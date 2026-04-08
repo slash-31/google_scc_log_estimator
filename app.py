@@ -1,6 +1,11 @@
 import time
+import os
 from flask import Flask, render_template, request
 from google.cloud import monitoring_v3
+
+# Fix for GOOGLE_APPLICATION_CREDENTIALS if it contains an unexpanded tilde (~)
+if os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = os.path.expanduser(os.environ['GOOGLE_APPLICATION_CREDENTIALS'])
 
 app = Flask(__name__)
 

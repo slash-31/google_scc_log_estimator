@@ -23,6 +23,11 @@ fi
 # 3. Activate Virtual Environment
 source venv/bin/activate
 
+# Expand tilde in GOOGLE_APPLICATION_CREDENTIALS if it exists
+if [[ "$GOOGLE_APPLICATION_CREDENTIALS" == "~"* ]]; then
+    export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS/#\~/$HOME}"
+fi
+
 # 4. Install/Update Requirements
 echo -e "${BLUE}Installing dependencies...${NC}"
 pip install --upgrade pip
