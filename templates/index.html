@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>GCP Security Logging Estimator</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        .card-feature { border-left: 4px solid #4285F4; transition: 0.2s; }
+        .card-feature:hover { background-color: #f8f9fa; }
+    </style>
+</head>
+<body class="bg-light">
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <h1 class="mb-3">SCC & ETD Log Estimator</h1>
+            <p class="text-muted">Calculates 30-day costs based on <b>live traffic metrics</b> via Cloud Monitoring API.</p>
+
+            <form method="POST" class="card shadow-sm p-4 mb-5">
+                <div class="mb-4">
+                    <label class="form-label fw-bold">GCP Project ID</label>
+                    <input type="text" name="project_id" class="form-control" placeholder="my-production-project" required>
+                </div>
+
+                <h5 class="mb-3">Recommended Security Features</h5>
+                
+                <div class="card p-3 mb-2 card-feature">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features" value="dns" id="dns" checked>
+                        <label class="form-check-label" for="dns">
+                            <strong>Cloud DNS Logs</strong> (ETD Recommendation) <br>
+                            <small class="text-muted">Required to detect DNS tunneling and C2 beaconing.</small>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="card p-3 mb-2 card-feature">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features" value="lb" id="lb">
+                        <label class="form-check-label" for="lb">
+                            <strong>Load Balancer Logs</strong> (SHA Best Practice) <br>
+                            <small class="text-muted">Visibility into external request patterns and potential DDoS.</small>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="card p-3 mb-2 card-feature">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features" value="gcs_audit" id="gcs">
+                        <label class="form-check-label" for="gcs">
+                            <strong>GCS Data Access Audit</strong> (Sensitive Data Protection) <br>
+                            <small class="text-muted">Tracks who is downloading/reading files in Storage buckets.</small>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="card p-3 mb-2 card-feature">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features" value="bq_audit" id="bq">
+                        <label class="form-check-label" for="bq">
+                            <strong>BigQuery Data Access</strong> (Exfiltration Detection) <br>
+                            <small class="text-muted">Required for ETD to detect anomalous table exports.</small>
+                        </label>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold mt-3">Run Local Estimate</button>
+            </form>
+
+            {% if results %}
+            <div class="card shadow p-4 border-primary">
+                <h3>Projection for: {{ results.project_id }}</h3>
+                <hr>
+                <table class="table align-middle">
+                    <thead>
+                        <tr><th>Log Type</th><th>Est. Volume (30d)</th><th>Est. Cost (USD)</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for item in results.items %}
+                        <tr>
+                            <td>{{ item.name }}</td>
+                            <td>{{ item.volume }} GiB</td>
+                            <td class="fw-bold text-success">${{ item.cost }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class="d-flex justify-content-between pt-3">
+                    <span class="text-muted small">Based on $0.50/GiB pricing.</span>
+                    <h2 class="text-primary">Total: ${{ results.total_cost }}</h2>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+</body>
+</html>
