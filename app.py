@@ -118,6 +118,14 @@ def parse_args():
         help="Run Flask in debug mode with auto-reload.",
     )
 
+    # -- Scope --
+    parser.add_argument(
+        "-o", "--org-id",
+        metavar="ORG_ID",
+        help="GCP Organization ID. When set, the UI defaults to org-wide "
+             "scope and pre-fills the organization ID field.",
+    )
+
     # -- Preflight --
     parser.add_argument(
         "-c", "--preflight",
@@ -1014,6 +1022,9 @@ def index():
                 "sampling_rate": sampling_rate,
             }
 
+    # Pre-fill org ID from CLI flag if provided.
+    cli_org_id = app.config.get("CLI_ORG_ID", "")
+
     return render_template(
         "index.html",
         results=results,
@@ -1023,6 +1034,7 @@ def index():
         free_tier_logs=FREE_TIER_LOGS,
         paid_log_tiers=PAID_LOG_TIERS,
         free_operations=FREE_OPERATIONS,
+        cli_org_id=cli_org_id,
     )
 
 
@@ -1281,6 +1293,9 @@ if __name__ == "__main__":
     if args.preflight:
         ok = run_preflight(args.preflight)
         sys.exit(0 if ok else 1)
+
+    # Store CLI org-id on the app config so the route can pre-fill the form.
+    app.config["CLI_ORG_ID"] = args.org_id or ""
 
     # Start the Flask development server.
     app.run(host=args.host, port=args.port, debug=args.debug)

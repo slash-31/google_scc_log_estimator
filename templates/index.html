@@ -260,17 +260,17 @@
                     <label class="form-label fw-bold mb-2">Estimation Scope</label>
                     <div class="btn-group w-100 mb-3" role="group">
                         <input type="radio" class="btn-check" name="scope" value="project"
-                               id="scopeProject" checked onchange="updateScope()">
+                               id="scopeProject" {{ '' if cli_org_id else 'checked' }} onchange="updateScope()">
                         <label class="btn btn-outline-primary" for="scopeProject">Single Project</label>
                         <input type="radio" class="btn-check" name="scope" value="folder"
                                id="scopeFolder" onchange="updateScope()">
                         <label class="btn btn-outline-primary" for="scopeFolder">Folder</label>
                         <input type="radio" class="btn-check" name="scope" value="org"
-                               id="scopeOrg" onchange="updateScope()">
+                               id="scopeOrg" {{ 'checked' if cli_org_id else '' }} onchange="updateScope()">
                         <label class="btn btn-outline-primary" for="scopeOrg">Organization</label>
                     </div>
 
-                    <div id="field-project" class="scope-field active">
+                    <div id="field-project" class="scope-field {{ '' if cli_org_id else 'active' }}">
                         <label class="form-label">GCP Project ID</label>
                         <input type="text" name="project_id" class="form-control"
                                placeholder="my-production-project">
@@ -281,10 +281,10 @@
                                placeholder="123456789012">
                         <small class="text-muted">Scans all active projects under this folder.</small>
                     </div>
-                    <div id="field-org" class="scope-field">
+                    <div id="field-org" class="scope-field {{ 'active' if cli_org_id else '' }}">
                         <label class="form-label">Organization ID</label>
                         <input type="text" name="org_id" class="form-control"
-                               placeholder="123456789012">
+                               placeholder="123456789012" value="{{ cli_org_id }}">
                         <small class="text-muted">
                             Scans all active projects in the organization.
                             Requires <code>resourcemanager.projects.list</code> permission.

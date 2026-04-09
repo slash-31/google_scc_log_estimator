@@ -12,6 +12,8 @@
 #   -k, --key-file PATH     Path to a GCP service account JSON key file (JWT).
 #                            If provided, the key is validated before the app
 #                            starts.  On failure the script exits with guidance.
+#   -o, --org-id ORG_ID      GCP Organization ID. Pre-fills the org field in
+#                            the UI and defaults scope to organization.
 #   -c, --preflight PROJECT  Run preflight checks (auth, API access) against
 #                            PROJECT and exit without starting the server.
 #   -p, --port PORT          Flask listen port           (default: 5000)
@@ -40,6 +42,7 @@ NC='\033[0m'  # No Color
 # ----- Default values for optional arguments ------------------------------
 KEY_FILE=""
 PREFLIGHT_PROJECT=""
+ORG_ID=""
 PORT="5000"
 HOST="127.0.0.1"
 DEBUG_FLAG=""
@@ -59,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -c|--preflight)
             PREFLIGHT_PROJECT="$2"
+            shift 2
+            ;;
+        -o|--org-id)
+            ORG_ID="$2"
             shift 2
             ;;
         -p|--port)
@@ -283,6 +290,7 @@ fi
 APP_ARGS=("--host" "$HOST" "--port" "$PORT")
 [[ -n "$DEBUG_FLAG" ]]        && APP_ARGS+=("--debug")
 [[ -n "$KEY_FILE" ]]          && APP_ARGS+=("--key-file" "$KEY_FILE")
+[[ -n "$ORG_ID" ]]            && APP_ARGS+=("--org-id" "$ORG_ID")
 [[ -n "$PREFLIGHT_PROJECT" ]] && APP_ARGS+=("--preflight" "$PREFLIGHT_PROJECT")
 
 # -- Preflight mode: run checks and exit -----------------------------------
