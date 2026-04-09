@@ -24,12 +24,45 @@
     <div class="row justify-content-center">
         <div class="col-lg-9">
             <h1 class="mb-2">SCC Log Ingestion Estimator</h1>
-            <p class="text-muted mb-4">
+
+            <div class="alert alert-warning mb-4">
+                <strong>Disclaimer:</strong> The values shown by this tool are <strong>estimates only</strong>
+                and should not be treated as exact billing projections.
+            </div>
+
+            <p class="text-muted mb-2">
                 Estimates 30-day Cloud Logging ingestion costs for
                 <strong>Event Threat Detection (ETD)</strong> and
-                <strong>Security Health Analytics (SHA)</strong> in SCC Premium.<br>
-                Projections are based on <b>live traffic metrics</b> from the last 7 days via Cloud Monitoring API.
+                <strong>Security Health Analytics (SHA)</strong> in SCC Premium.
             </p>
+
+            <div class="card bg-light border-0 p-3 mb-4">
+                <p class="small mb-2"><strong>How estimates are generated:</strong></p>
+                <ul class="small mb-2">
+                    <li>
+                        We query <strong>your project's actual Cloud Monitoring metrics</strong>
+                        (request counts, byte counts, packet counts) from the <strong>last 7 days</strong>
+                        via the Cloud Monitoring API.
+                    </li>
+                    <li>
+                        The 7-day totals are divided by 7 and multiplied by 30 to extrapolate a
+                        <strong>30-day estimate</strong>. For always-on audit logs we use actual
+                        ingestion byte counts; for logs not yet enabled we use proxy metrics
+                        (e.g. API request counts) multiplied by an estimated per-entry size.
+                    </li>
+                    <li>
+                        Volume is multiplied by the applicable ingestion rate
+                        (<strong>$0.50/GiB</strong> standard, <strong>$0.25/GiB</strong> for network
+                        telemetry logs) to produce a cost estimate.
+                    </li>
+                </ul>
+                <p class="small text-danger mb-0">
+                    <strong>Important:</strong> Actual logging costs will change as traffic to your
+                    GCP resources increases or decreases. Spikes in API calls, network traffic,
+                    or new workloads will directly increase log volume and cost beyond these
+                    estimates. Re-run this tool periodically to track changes.
+                </p>
+            </div>
 
             <!-- Auth status -->
             {% if auth_info %}
