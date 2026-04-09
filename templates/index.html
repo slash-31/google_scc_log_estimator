@@ -202,7 +202,7 @@
                 <div class="card shadow p-4 border-primary">
                     <h3>30-Day Projection: <code>{{ results.project_id }}</code></h3>
                     <hr>
-                    {% if results.items %}
+                    {% if results.estimates %}
                     <table class="table align-middle mb-0">
                         <thead>
                             <tr>
@@ -213,12 +213,15 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for item in results.items %}
+                            {% for item in results.estimates %}
                             <tr>
                                 <td>
                                     {{ item.name }}
                                     {% if item.always_on %}
                                         <span class="badge bg-success ms-1">Always On</span>
+                                    {% endif %}
+                                    {% if not item.has_data %}
+                                        <span class="badge bg-secondary ms-1">No data</span>
                                     {% endif %}
                                 </td>
                                 <td>
@@ -250,6 +253,18 @@
                     </div>
                     {% else %}
                     <p class="text-muted">No estimable log sources were selected.</p>
+                    {% endif %}
+
+                    <!-- Explain "No data" badge -->
+                    {% if results.estimates %}
+                    {% set no_data_count = results.estimates | selectattr('has_data', 'false') | list | length %}
+                    {% if no_data_count > 0 %}
+                    <div class="alert alert-secondary small mt-3 mb-0">
+                        <strong>No data</strong> means the Cloud Monitoring metric returned no results for this
+                        project.  This typically means the GCP service is not in use (e.g. no Cloud DNS zones,
+                        no Cloud SQL instances) — the estimated volume for those sources is $0.
+                    </div>
+                    {% endif %}
                     {% endif %}
                 </div>
 
@@ -294,7 +309,7 @@
                             <br><strong class="text-primary">${{ proj.total_cost }}/mo</strong>
                         </div>
                     </div>
-                    {% if proj.items %}
+                    {% if proj.estimates %}
                     <table class="table table-sm mb-0">
                         <thead>
                             <tr>
@@ -304,12 +319,15 @@
                             </tr>
                         </thead>
                         <tbody>
-                            {% for item in proj.items %}
+                            {% for item in proj.estimates %}
                             <tr>
                                 <td class="small">
                                     {{ item.name }}
                                     {% if item.always_on %}
                                         <span class="badge bg-success" style="font-size:0.65rem">Always On</span>
+                                    {% endif %}
+                                    {% if not item.has_data %}
+                                        <span class="badge bg-secondary" style="font-size:0.65rem">No data</span>
                                     {% endif %}
                                 </td>
                                 <td class="text-end small">{{ item.volume_gib }} GiB</td>

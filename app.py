@@ -36,6 +36,7 @@ Required IAM permissions:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -46,9 +47,17 @@ from flask import Flask, render_template, request
 # surface immediately rather than at first request time.
 from google.cloud import monitoring_v3
 from google.cloud import resourcemanager_v3
+from google.api_core.exceptions import NotFound, GoogleAPICallError
 from google.auth import default as get_default_credentials
 from google.auth.exceptions import DefaultCredentialsError
 from google.auth.transport.requests import Request as AuthRequest
+
+# Suppress noisy gRPC C-core warnings about file descriptors after fork.
+# These are harmless diagnostics from the gRPC event-polling layer.
+os.environ.setdefault("GRPC_POLL_STRATEGY", "epoll1")
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # CLI argument parsing
@@ -107,6 +116,15 @@ def parse_args():
         "-d", "--debug",
         action="store_true",
         help="Run Flask in debug mode with auto-reload.",
+    )
+
+    # -- Preflight --
+    parser.add_argument(
+        "-c", "--preflight",
+        metavar="PROJECT",
+        help="Run preflight checks against PROJECT (verify API access, "
+             "required APIs enabled) and exit.  Useful for validating "
+             "credentials before running the full estimator.",
     )
 
     return parser.parse_args()
@@ -565,8 +583,32 @@ def fetch_metric_7d(project_id, source):
                 # Metrics may report int64 or double; take whichever is non-zero.
                 total += point.value.int64_value or point.value.double_value
         return total
+
+    except NotFound:
+        # 404 = the metric type doesn't exist in this project.  This is
+        # expected when the corresponding GCP service is not in use (e.g.
+        # no Cloud DNS zones, no Cloud SQL instances).  Silently return 0
+        # so the UI shows "No data" instead of an error.
+        logger.info(
+            "No metric data for %s in %s (service likely not in use)",
+            source["metric"], project_id,
+        )
+        return 0
+
+    except GoogleAPICallError as exc:
+        # Real API errors (permission denied, quota, server errors).
+        logger.warning(
+            "API error fetching %s for %s: %s",
+            source["metric"], project_id, exc,
+        )
+        return 0
+
     except Exception as exc:
-        print(f"[error] fetching {source['metric']} for {project_id}: {exc}")
+        # Unexpected errors — log the full traceback for debugging.
+        logger.exception(
+            "Unexpected error fetching %s for %s",
+            source["metric"], project_id,
+        )
         return 0
 
 
@@ -626,10 +668,14 @@ def estimate_project(project_id, selected_keys, sampling_rate):
         sampling_rate: VPC Flow Log sampling rate (0.0–1.0).
 
     Returns:
-        Tuple of (items, total_gib) where *items* is a list of per-source
-        result dicts and *total_gib* is the aggregate volume.
+        Tuple of (estimates, total_gib) where *estimates* is a list of
+        per-source result dicts and *total_gib* is the aggregate volume.
+
+    Note:
+        The result key is called ``estimates`` (not ``items``) to avoid
+        colliding with Python's ``dict.items()`` method in Jinja2 templates.
     """
-    items = []
+    estimates = []
     total_gib = 0
 
     for key in selected_keys:
@@ -642,16 +688,21 @@ def estimate_project(project_id, selected_keys, sampling_rate):
         gib = estimate_monthly_gib(source, raw_7d, sampling_rate)
         cost = gib * COST_PER_GIB
 
-        items.append({
+        # Track whether the metric returned any data so the UI can
+        # distinguish "0 volume" from "no metric data available".
+        has_data = raw_7d > 0
+
+        estimates.append({
             "name": source["label"],
             "category": source["category"],
             "volume_gib": round(gib, 3),
             "cost": round(cost, 2),
             "always_on": source.get("always_on", False),
+            "has_data": has_data,
         })
         total_gib += gib
 
-    return items, total_gib
+    return estimates, total_gib
 
 
 # ---------------------------------------------------------------------------
@@ -683,13 +734,13 @@ def index():
 
         # -- Single-project scope --
         if scope == "project":
-            items, total_gib = estimate_project(
+            estimates, total_gib = estimate_project(
                 project_id, selected_keys, sampling_rate
             )
             results = {
                 "scope": "project",
                 "project_id": project_id,
-                "items": items,
+                "estimates": estimates,
                 "total_gib": round(total_gib, 3),
                 "total_cost": round(total_gib * COST_PER_GIB, 2),
                 "sampling_rate": sampling_rate,
@@ -751,18 +802,154 @@ def _scan_projects(projects, selected_keys, sampling_rate):
 
     for proj in projects:
         pid = proj["project_id"]
-        items, proj_gib = estimate_project(pid, selected_keys, sampling_rate)
+        estimates, proj_gib = estimate_project(pid, selected_keys, sampling_rate)
         proj_cost = proj_gib * COST_PER_GIB
         grand_total_gib += proj_gib
         project_results.append({
             "project_id": pid,
             "display_name": proj["display_name"],
-            "items": items,
+            "estimates": estimates,
             "total_gib": round(proj_gib, 3),
             "total_cost": round(proj_cost, 2),
         })
 
     return project_results, grand_total_gib
+
+
+# ---------------------------------------------------------------------------
+# Preflight checks
+# ---------------------------------------------------------------------------
+
+# APIs the estimator needs and the gcloud command to enable each one.
+REQUIRED_APIS = [
+    {
+        "name": "Cloud Monitoring API",
+        "service": "monitoring.googleapis.com",
+        "check": lambda pid: _check_monitoring_api(pid),
+    },
+    {
+        "name": "Cloud Resource Manager API",
+        "service": "cloudresourcemanager.googleapis.com",
+        "check": lambda pid: _check_resource_manager_api(pid),
+    },
+]
+
+
+def _check_monitoring_api(project_id):
+    """Attempt a lightweight Monitoring API call to verify access.
+
+    Returns (ok: bool, detail: str).
+    """
+    try:
+        client = monitoring_v3.MetricServiceClient()
+        # list_time_series with an impossible metric type — we only care
+        # whether the API responds (200/403/404) vs rejects (permission
+        # denied or API-not-enabled).
+        now = time.time()
+        interval = monitoring_v3.TimeInterval({
+            "end_time": {"seconds": int(now)},
+            "start_time": {"seconds": int(now - 60)},
+        })
+        list(client.list_time_series(
+            name=f"projects/{project_id}",
+            filter='metric.type = "logging.googleapis.com/byte_count"',
+            interval=interval,
+            view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.HEADERS,
+        ))
+        return True, "OK"
+    except NotFound:
+        # 404 = metric not found, but the API itself is reachable.
+        return True, "OK (API enabled, metric not yet present)"
+    except GoogleAPICallError as exc:
+        if "has not been used" in str(exc) or "is not enabled" in str(exc):
+            return False, (
+                f"API not enabled. Run:\n"
+                f"  gcloud services enable monitoring.googleapis.com "
+                f"--project={project_id}"
+            )
+        if "PERMISSION_DENIED" in str(exc) or exc.code == 403:
+            return False, (
+                f"Permission denied. The authenticated identity needs "
+                f"monitoring.timeSeries.list on project {project_id}."
+            )
+        return False, str(exc)
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _check_resource_manager_api(project_id):
+    """Verify the Resource Manager API is accessible (needed for org scans).
+
+    Returns (ok: bool, detail: str).
+    """
+    try:
+        client = resourcemanager_v3.ProjectsClient()
+        # Just try to get the project — lightweight read.
+        client.get_project(name=f"projects/{project_id}")
+        return True, "OK"
+    except NotFound:
+        return False, f"Project '{project_id}' not found."
+    except GoogleAPICallError as exc:
+        if "has not been used" in str(exc) or "is not enabled" in str(exc):
+            return False, (
+                f"API not enabled. Run:\n"
+                f"  gcloud services enable cloudresourcemanager.googleapis.com "
+                f"--project={project_id}"
+            )
+        if "PERMISSION_DENIED" in str(exc) or exc.code == 403:
+            return False, (
+                f"Permission denied. The authenticated identity needs "
+                f"resourcemanager.projects.get on project {project_id}."
+            )
+        return False, str(exc)
+    except Exception as exc:
+        return False, str(exc)
+
+
+def run_preflight(project_id):
+    """Run all preflight checks against *project_id* and print results.
+
+    Checks:
+        1. Authentication is valid.
+        2. Required GCP APIs are enabled and accessible.
+
+    Returns:
+        True if all checks pass, False otherwise.
+    """
+    print(f"\n{'='*60}")
+    print(f"  Preflight checks — project: {project_id}")
+    print(f"{'='*60}\n")
+
+    all_ok = True
+
+    # -- Auth check --
+    auth = get_auth_info()
+    if auth["valid"]:
+        print(f"  [PASS] Authentication: {auth['method']} ({auth.get('identity', 'unknown')})")
+    else:
+        print(f"  [FAIL] Authentication: {auth.get('error', 'no credentials')}")
+        all_ok = False
+
+    # -- API checks --
+    for api in REQUIRED_APIS:
+        ok, detail = api["check"](project_id)
+        status = "PASS" if ok else "FAIL"
+        print(f"  [{status}] {api['name']}: {detail}")
+        if not ok:
+            all_ok = False
+
+    # -- Summary --
+    print(f"\n{'='*60}")
+    if all_ok:
+        print("  All preflight checks passed.")
+    else:
+        print("  Some checks FAILED.  Fix the issues above before running")
+        print("  the estimator.  Common fixes:")
+        print(f"    gcloud services enable monitoring.googleapis.com --project={project_id}")
+        print(f"    gcloud services enable cloudresourcemanager.googleapis.com --project={project_id}")
+    print(f"{'='*60}\n")
+
+    return all_ok
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +961,11 @@ if __name__ == "__main__":
 
     # Validate / configure authentication before starting the server.
     setup_auth(args)
+
+    # If --preflight was requested, run checks and exit.
+    if args.preflight:
+        ok = run_preflight(args.preflight)
+        sys.exit(0 if ok else 1)
 
     # Start the Flask development server.
     app.run(host=args.host, port=args.port, debug=args.debug)

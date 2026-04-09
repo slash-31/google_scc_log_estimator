@@ -9,13 +9,15 @@
 #   ./start_web.sh [OPTIONS]
 #
 # Options:
-#   -k, --key-file PATH   Path to a GCP service account JSON key file (JWT).
-#                          If provided, the key is validated before the app
-#                          starts.  On failure the script exits with guidance.
-#   -p, --port PORT        Flask listen port           (default: 5000)
-#   -H, --host HOST        Flask listen address        (default: 127.0.0.1)
-#   -d, --debug            Run Flask in debug mode with auto-reload
-#   -h, --help             Show this help text and exit
+#   -k, --key-file PATH     Path to a GCP service account JSON key file (JWT).
+#                            If provided, the key is validated before the app
+#                            starts.  On failure the script exits with guidance.
+#   -c, --preflight PROJECT  Run preflight checks (auth, API access) against
+#                            PROJECT and exit without starting the server.
+#   -p, --port PORT          Flask listen port           (default: 5000)
+#   -H, --host HOST          Flask listen address        (default: 127.0.0.1)
+#   -d, --debug              Run Flask in debug mode with auto-reload
+#   -h, --help               Show this help text and exit
 #
 # Authentication priority (same as app.py):
 #   1. --key-file / -k  flag  (service account JWT)
@@ -37,6 +39,7 @@ NC='\033[0m'  # No Color
 
 # ----- Default values for optional arguments ------------------------------
 KEY_FILE=""
+PREFLIGHT_PROJECT=""
 PORT="5000"
 HOST="127.0.0.1"
 DEBUG_FLAG=""
@@ -52,6 +55,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -k|--key-file)
             KEY_FILE="$2"
+            shift 2
+            ;;
+        -c|--preflight)
+            PREFLIGHT_PROJECT="$2"
             shift 2
             ;;
         -p|--port)
@@ -274,9 +281,19 @@ fi
 
 # Build the app.py argument list.
 APP_ARGS=("--host" "$HOST" "--port" "$PORT")
-[[ -n "$DEBUG_FLAG" ]] && APP_ARGS+=("--debug")
-[[ -n "$KEY_FILE" ]]   && APP_ARGS+=("--key-file" "$KEY_FILE")
+[[ -n "$DEBUG_FLAG" ]]        && APP_ARGS+=("--debug")
+[[ -n "$KEY_FILE" ]]          && APP_ARGS+=("--key-file" "$KEY_FILE")
+[[ -n "$PREFLIGHT_PROJECT" ]] && APP_ARGS+=("--preflight" "$PREFLIGHT_PROJECT")
 
+# -- Preflight mode: run checks and exit -----------------------------------
+if [[ -n "$PREFLIGHT_PROJECT" ]]; then
+    echo ""
+    echo -e "${BLUE}Running preflight checks against project: ${PREFLIGHT_PROJECT}${NC}"
+    python3 app.py "${APP_ARGS[@]}"
+    exit $?
+fi
+
+# -- Normal mode: launch the web server -----------------------------------
 echo ""
 echo -e "${GREEN}Authentication verified. Launching web app at http://${HOST}:${PORT}${NC}"
 echo "Press Ctrl+C to stop the server."
