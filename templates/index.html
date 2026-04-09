@@ -52,6 +52,73 @@
             </div>
             {% endif %}
 
+            <!-- Required IAM Roles (collapsible) -->
+            {% if required_iam %}
+            <div class="card mb-4">
+                <div class="card-header p-2">
+                    <button class="btn btn-sm btn-link text-decoration-none w-100 text-start"
+                            type="button" data-bs-toggle="collapse" data-bs-target="#iamPanel">
+                        <strong>Required IAM Roles &amp; Permissions</strong>
+                        <span class="text-muted ms-2">(click to expand)</span>
+                    </button>
+                </div>
+                <div class="collapse" id="iamPanel">
+                    <div class="card-body p-3">
+                        <p class="small text-muted mb-3">
+                            The authenticated identity (user or service account) must have
+                            these roles on each target project.  For org/folder scans, the
+                            org-scoped roles are also required.
+                        </p>
+                        <table class="table table-sm small mb-3">
+                            <thead>
+                                <tr>
+                                    <th>IAM Role</th>
+                                    <th>Scope</th>
+                                    <th>Permissions</th>
+                                    <th>Why</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for entry in required_iam %}
+                                <tr>
+                                    <td><code>{{ entry.role }}</code></td>
+                                    <td>
+                                        {% if entry.scope == 'project' %}
+                                            <span class="badge bg-primary">Per Project</span>
+                                        {% else %}
+                                            <span class="badge bg-warning text-dark">Org / Folder</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% for perm in entry.permissions %}
+                                            <code class="d-block">{{ perm }}</code>
+                                        {% endfor %}
+                                    </td>
+                                    <td>{{ entry.reason }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        <div class="bg-light rounded p-2">
+                            <p class="small fw-bold mb-1">Grant commands (replace &lt;IDENTITY&gt;):</p>
+                            <pre class="small mb-0" style="white-space:pre-wrap">{% for entry in required_iam %}{% if entry.scope == 'project' %}gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member='serviceAccount:&lt;IDENTITY&gt;' \
+  --role='{{ entry.role }}'
+{% endif %}{% endfor %}
+# For org-wide scans:
+{% for entry in required_iam %}{% if entry.scope == 'org' %}gcloud organizations add-iam-policy-binding ORG_ID \
+  --member='serviceAccount:&lt;IDENTITY&gt;' \
+  --role='{{ entry.role }}'
+{% endif %}{% endfor %}</pre>
+                        </div>
+                        <p class="small text-muted mt-2 mb-0">
+                            Run <code>python3 app.py -c PROJECT_ID</code> to verify permissions with a preflight check.
+                        </p>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- SHA info -->
             <div class="alert alert-info mb-4">
                 <strong>About SHA:</strong> Security Health Analytics analyzes resource configurations from
@@ -363,6 +430,7 @@
     </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function updateScope() {
     const scope = document.querySelector('input[name="scope"]:checked').value;

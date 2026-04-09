@@ -413,6 +413,64 @@ LOG_SOURCES = [
         "metric": "cloudsql.googleapis.com/database/network/connections",
         "size_kb": 1.0,
     },
+    {
+        "key": "firewall",
+        "label": "VPC Firewall Rules Logs",
+        "category": "recommended",
+        "description": (
+            "Logs allowed/denied connections per firewall rule. Critical for "
+            "detecting lateral movement and policy violations."
+        ),
+        # Proxy metric: firewall rule hit count — each hit ≈ one log entry.
+        "metric": "firewallinsights.googleapis.com/subnet/firewall_hit_count",
+        "size_kb": 1.0,
+    },
+    {
+        "key": "cloud_nat",
+        "label": "Cloud NAT Gateway Logs",
+        "category": "recommended",
+        "description": (
+            "Logs NAT translation events. Helps detect outbound data exfiltration "
+            "and unexpected egress traffic from private VMs."
+        ),
+        # Proxy metric: NAT allocated port count as a rough activity proxy.
+        "metric": "router.googleapis.com/nat/allocated_ports",
+        "size_kb": 1.0,
+    },
+    {
+        "key": "iap",
+        "label": "IAP (Identity-Aware Proxy) Access Logs",
+        "category": "recommended",
+        "description": (
+            "Logs every request through Identity-Aware Proxy. Detects "
+            "unauthorized access attempts to IAP-protected applications."
+        ),
+        "metric": "iap.googleapis.com/request_count",
+        "size_kb": 0.7,
+    },
+    {
+        "key": "lb",
+        "label": "HTTP(S) Load Balancer Logs",
+        "category": "recommended",
+        "description": (
+            "Logs external request patterns. Provides visibility into "
+            "potential DDoS, web attacks, and suspicious traffic."
+        ),
+        "metric": "loadbalancing.googleapis.com/https/request_count",
+        "size_kb": 1.0,
+    },
+    {
+        "key": "artifact_registry",
+        "label": "Artifact Registry Data Access Audit Logs",
+        "category": "recommended",
+        "description": (
+            "Tracks image pulls, pushes, and vulnerability scan access. "
+            "Detects supply-chain tampering and unauthorized image usage."
+        ),
+        # Proxy metric: API request count for Artifact Registry operations.
+        "metric": "artifactregistry.googleapis.com/request_count",
+        "size_kb": 1.0,
+    },
 
     # === OPTIONAL (environment-specific) ===
     {
@@ -435,6 +493,48 @@ LOG_SOURCE_MAP = {s["key"]: s for s in LOG_SOURCES}
 COST_PER_GIB = 0.50           # standard Cloud Logging ingestion rate
 KB_PER_GIB = 1_048_576        # 1024 * 1024
 BYTES_PER_GIB = 1_073_741_824 # 1024 ** 3
+
+# ---------------------------------------------------------------------------
+# Required IAM roles and permissions
+#
+# These are the minimum IAM bindings the authenticated identity needs.
+# Organised by scope so the UI and preflight can show exactly what applies.
+#
+# Each entry has:
+#   role        — the predefined IAM role that grants the permission(s)
+#   permissions — the specific IAM permissions the estimator exercises
+#   scope       — "project" (always needed) or "org" (only for org/folder scans)
+#   reason      — why the permission is needed (shown in UI + preflight)
+# ---------------------------------------------------------------------------
+REQUIRED_IAM = [
+    {
+        "role": "roles/monitoring.viewer",
+        "permissions": ["monitoring.timeSeries.list"],
+        "scope": "project",
+        "reason": "Read Cloud Monitoring metrics for each target project.",
+    },
+    {
+        "role": "roles/resourcemanager.organizationViewer",
+        "permissions": [
+            "resourcemanager.projects.list",
+            "resourcemanager.projects.get",
+        ],
+        "scope": "org",
+        "reason": (
+            "Discover projects under an organization or folder. "
+            "Only required for org-wide or folder-wide scans."
+        ),
+    },
+    {
+        "role": "roles/browser",
+        "permissions": ["resourcemanager.projects.get"],
+        "scope": "project",
+        "reason": (
+            "Read basic project metadata (used by preflight checks). "
+            "Included in most viewer roles."
+        ),
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +883,7 @@ def index():
         results=results,
         log_sources=LOG_SOURCES,
         auth_info=auth_info,
+        required_iam=REQUIRED_IAM,
     )
 
 
@@ -906,12 +1007,49 @@ def _check_resource_manager_api(project_id):
         return False, str(exc)
 
 
+def _check_iam_permissions(project_id):
+    """Test which required IAM permissions the caller actually has.
+
+    Uses the Resource Manager ``testIamPermissions`` API to check all
+    project-scoped permissions in one call.
+
+    Returns:
+        List of (permission: str, granted: bool, role_hint: str) tuples.
+    """
+    # Collect all project-scoped permissions to test.
+    perms_to_test = []
+    perm_to_role = {}
+    for entry in REQUIRED_IAM:
+        for perm in entry["permissions"]:
+            if perm not in perm_to_role:
+                perms_to_test.append(perm)
+                perm_to_role[perm] = entry["role"]
+
+    try:
+        client = resourcemanager_v3.ProjectsClient()
+        response = client.test_iam_permissions(
+            resource=f"projects/{project_id}",
+            permissions=perms_to_test,
+        )
+        granted = set(response.permissions)
+    except Exception as exc:
+        logger.warning("testIamPermissions failed for %s: %s", project_id, exc)
+        # If we can't test, return unknown status.
+        return [(p, None, perm_to_role[p]) for p in perms_to_test]
+
+    return [
+        (perm, perm in granted, perm_to_role[perm])
+        for perm in perms_to_test
+    ]
+
+
 def run_preflight(project_id):
     """Run all preflight checks against *project_id* and print results.
 
     Checks:
         1. Authentication is valid.
         2. Required GCP APIs are enabled and accessible.
+        3. Required IAM permissions are granted.
 
     Returns:
         True if all checks pass, False otherwise.
@@ -922,31 +1060,66 @@ def run_preflight(project_id):
 
     all_ok = True
 
-    # -- Auth check --
+    # -- 1. Auth check --
+    print("  --- Authentication ---")
     auth = get_auth_info()
     if auth["valid"]:
-        print(f"  [PASS] Authentication: {auth['method']} ({auth.get('identity', 'unknown')})")
+        print(f"  [PASS] {auth['method']} ({auth.get('identity', 'unknown')})")
     else:
-        print(f"  [FAIL] Authentication: {auth.get('error', 'no credentials')}")
+        print(f"  [FAIL] {auth.get('error', 'no credentials')}")
         all_ok = False
+    print()
 
-    # -- API checks --
+    # -- 2. API checks --
+    print("  --- Required APIs ---")
     for api in REQUIRED_APIS:
         ok, detail = api["check"](project_id)
         status = "PASS" if ok else "FAIL"
         print(f"  [{status}] {api['name']}: {detail}")
         if not ok:
             all_ok = False
+    print()
+
+    # -- 3. IAM permission checks --
+    print("  --- IAM Permissions ---")
+    iam_results = _check_iam_permissions(project_id)
+    for perm, granted, role_hint in iam_results:
+        if granted is None:
+            print(f"  [ ?? ] {perm}  (could not test — see API errors above)")
+        elif granted:
+            print(f"  [PASS] {perm}")
+        else:
+            print(f"  [FAIL] {perm}")
+            print(f"         Grant via: gcloud projects add-iam-policy-binding {project_id} \\")
+            print(f"           --member='<IDENTITY>' --role='{role_hint}'")
+            all_ok = False
+    print()
+
+    # -- 4. Required IAM roles reference table --
+    print("  --- Required IAM Roles Reference ---")
+    print(f"  {'Role':<45} {'Scope':<10} Reason")
+    print(f"  {'-'*44}  {'-'*9} {'-'*40}")
+    for entry in REQUIRED_IAM:
+        print(f"  {entry['role']:<45} {entry['scope']:<10} {entry['reason']}")
+    print()
 
     # -- Summary --
-    print(f"\n{'='*60}")
+    print(f"{'='*60}")
     if all_ok:
         print("  All preflight checks passed.")
     else:
         print("  Some checks FAILED.  Fix the issues above before running")
         print("  the estimator.  Common fixes:")
+        print()
+        print(f"  # Enable required APIs:")
         print(f"    gcloud services enable monitoring.googleapis.com --project={project_id}")
         print(f"    gcloud services enable cloudresourcemanager.googleapis.com --project={project_id}")
+        print()
+        print(f"  # Grant required roles (replace <IDENTITY> with user/SA email):")
+        for entry in REQUIRED_IAM:
+            if entry["scope"] == "project":
+                print(f"    gcloud projects add-iam-policy-binding {project_id} \\")
+                print(f"      --member='serviceAccount:<IDENTITY>' --role='{entry['role']}'")
     print(f"{'='*60}\n")
 
     return all_ok
