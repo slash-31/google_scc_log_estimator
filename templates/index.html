@@ -5,94 +5,352 @@
     <title>GCP Security Logging Estimator</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <style>
-        .card-feature { border-left: 4px solid #4285F4; transition: 0.2s; }
+        .card-must     { border-left: 4px solid #34a853; }
+        .card-rec      { border-left: 4px solid #4285f4; }
+        .card-opt      { border-left: 4px solid #9aa0a6; }
+        .card-feature  { transition: 0.2s; }
         .card-feature:hover { background-color: #f8f9fa; }
+        .badge-must    { background-color: #34a853; }
+        .badge-rec     { background-color: #4285f4; }
+        .badge-opt     { background-color: #9aa0a6; }
+        .sampling-control { background: #e8f0fe; border-radius: 8px; padding: 1rem; }
+        .scope-field   { display: none; }
+        .scope-field.active { display: block; }
+        .project-card  { border-left: 3px solid #4285f4; margin-bottom: 1rem; }
     </style>
 </head>
 <body class="bg-light">
 <div class="container py-5">
     <div class="row justify-content-center">
-        <div class="col-lg-8">
-            <h1 class="mb-3">SCC & ETD Log Estimator</h1>
-            <p class="text-muted">Calculates 30-day costs based on <b>live traffic metrics</b> via Cloud Monitoring API.</p>
+        <div class="col-lg-9">
+            <h1 class="mb-2">SCC Log Ingestion Estimator</h1>
+            <p class="text-muted mb-4">
+                Estimates 30-day Cloud Logging ingestion costs for
+                <strong>Event Threat Detection (ETD)</strong> and
+                <strong>Security Health Analytics (SHA)</strong> in SCC Premium.<br>
+                Projections are based on <b>live traffic metrics</b> from the last 7 days via Cloud Monitoring API.
+            </p>
 
-            <form method="POST" class="card shadow-sm p-4 mb-5">
-                <div class="mb-4">
-                    <label class="form-label fw-bold">GCP Project ID</label>
-                    <input type="text" name="project_id" class="form-control" placeholder="my-production-project" required>
-                </div>
-
-                <h5 class="mb-3">Recommended Security Features</h5>
-                
-                <div class="card p-3 mb-2 card-feature">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features" value="dns" id="dns" checked>
-                        <label class="form-check-label" for="dns">
-                            <strong>Cloud DNS Logs</strong> (ETD Recommendation) <br>
-                            <small class="text-muted">Required to detect DNS tunneling and C2 beaconing.</small>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="card p-3 mb-2 card-feature">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features" value="lb" id="lb">
-                        <label class="form-check-label" for="lb">
-                            <strong>Load Balancer Logs</strong> (SHA Best Practice) <br>
-                            <small class="text-muted">Visibility into external request patterns and potential DDoS.</small>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="card p-3 mb-2 card-feature">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features" value="gcs_audit" id="gcs">
-                        <label class="form-check-label" for="gcs">
-                            <strong>GCS Data Access Audit</strong> (Sensitive Data Protection) <br>
-                            <small class="text-muted">Tracks who is downloading/reading files in Storage buckets.</small>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="card p-3 mb-2 card-feature">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features" value="bq_audit" id="bq">
-                        <label class="form-check-label" for="bq">
-                            <strong>BigQuery Data Access</strong> (Exfiltration Detection) <br>
-                            <small class="text-muted">Required for ETD to detect anomalous table exports.</small>
-                        </label>
-                    </div>
-                </div>
-
-                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold mt-3">Run Local Estimate</button>
-            </form>
-
-            {% if results %}
-            <div class="card shadow p-4 border-primary">
-                <h3>Projection for: {{ results.project_id }}</h3>
-                <hr>
-                <table class="table align-middle">
-                    <thead>
-                        <tr><th>Log Type</th><th>Est. Volume (30d)</th><th>Est. Cost (USD)</th></tr>
-                    </thead>
-                    <tbody>
-                        {% for item in results.items %}
-                        <tr>
-                            <td>{{ item.name }}</td>
-                            <td>{{ item.volume }} GiB</td>
-                            <td class="fw-bold text-success">${{ item.cost }}</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-                <div class="d-flex justify-content-between pt-3">
-                    <span class="text-muted small">Based on $0.50/GiB pricing.</span>
-                    <h2 class="text-primary">Total: ${{ results.total_cost }}</h2>
-                </div>
+            <!-- Auth status -->
+            {% if auth_info %}
+            <div class="alert {{ 'alert-success' if auth_info.valid else 'alert-danger' }} d-flex align-items-center mb-4">
+                {% if auth_info.valid %}
+                    <strong class="me-2">Authenticated:</strong>
+                    {% if auth_info.method == 'service_account' %}
+                        Service Account ({{ auth_info.identity }})
+                        {% if auth_info.project %} &mdash; default project: {{ auth_info.project }}{% endif %}
+                    {% else %}
+                        gcloud ADC ({{ auth_info.identity }})
+                        {% if auth_info.project %} &mdash; default project: {{ auth_info.project }}{% endif %}
+                    {% endif %}
+                {% else %}
+                    <strong class="me-2">Not Authenticated:</strong>
+                    {{ auth_info.error }}
+                    <br>Run <code>gcloud auth application-default login</code> or set
+                    <code>GOOGLE_APPLICATION_CREDENTIALS</code> to a service account key file.
+                {% endif %}
             </div>
             {% endif %}
+
+            <!-- SHA info -->
+            <div class="alert alert-info mb-4">
+                <strong>About SHA:</strong> Security Health Analytics analyzes resource configurations from
+                Cloud Asset Inventory, not real-time logs. Enabling logs has minimal impact on SHA.
+                This estimator focuses on <strong>ETD log sources</strong>.
+            </div>
+
+            <form method="POST">
+                <!-- Scope selection -->
+                <div class="card p-3 mb-4 shadow-sm">
+                    <label class="form-label fw-bold mb-2">Estimation Scope</label>
+                    <div class="btn-group w-100 mb-3" role="group">
+                        <input type="radio" class="btn-check" name="scope" value="project"
+                               id="scopeProject" checked onchange="updateScope()">
+                        <label class="btn btn-outline-primary" for="scopeProject">Single Project</label>
+                        <input type="radio" class="btn-check" name="scope" value="folder"
+                               id="scopeFolder" onchange="updateScope()">
+                        <label class="btn btn-outline-primary" for="scopeFolder">Folder</label>
+                        <input type="radio" class="btn-check" name="scope" value="org"
+                               id="scopeOrg" onchange="updateScope()">
+                        <label class="btn btn-outline-primary" for="scopeOrg">Organization</label>
+                    </div>
+
+                    <div id="field-project" class="scope-field active">
+                        <label class="form-label">GCP Project ID</label>
+                        <input type="text" name="project_id" class="form-control"
+                               placeholder="my-production-project">
+                    </div>
+                    <div id="field-folder" class="scope-field">
+                        <label class="form-label">Folder ID</label>
+                        <input type="text" name="folder_id" class="form-control"
+                               placeholder="123456789012">
+                        <small class="text-muted">Scans all active projects under this folder.</small>
+                    </div>
+                    <div id="field-org" class="scope-field">
+                        <label class="form-label">Organization ID</label>
+                        <input type="text" name="org_id" class="form-control"
+                               placeholder="123456789012">
+                        <small class="text-muted">
+                            Scans all active projects in the organization.
+                            Requires <code>resourcemanager.projects.list</code> permission.
+                        </small>
+                    </div>
+                </div>
+
+                <!-- MUST HAVE -->
+                <h5 class="mb-2">
+                    <span class="badge badge-must text-white me-1">Must Have</span>
+                    Always-On Logs (no extra cost)
+                </h5>
+                <p class="text-muted small mb-3">
+                    These logs are always enabled. Selecting them shows your current ingestion volume.
+                </p>
+                {% for src in log_sources if src.category == 'must_have' %}
+                <div class="card p-3 mb-2 card-feature card-must">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features"
+                               value="{{ src.key }}" id="{{ src.key }}" checked>
+                        <label class="form-check-label" for="{{ src.key }}">
+                            <strong>{{ src.label }}</strong><br>
+                            <small class="text-muted">{{ src.description }}</small>
+                        </label>
+                    </div>
+                </div>
+                {% endfor %}
+
+                <!-- ETD internal note -->
+                <div class="alert alert-secondary mt-3 mb-4 small">
+                    <strong>ETD Foundational Network Detection:</strong> ETD automatically analyzes an internal,
+                    independent stream of VPC Flow data for network-based threat detection (malware, C2, etc.)
+                    at <strong>no extra Cloud Logging cost</strong>. This data is not queryable in Logs Explorer.
+                </div>
+
+                <!-- HIGHLY RECOMMENDED -->
+                <h5 class="mb-2">
+                    <span class="badge badge-rec text-white me-1">Recommended</span>
+                    Highly Recommended for ETD
+                </h5>
+                <p class="text-muted small mb-3">
+                    Enable these to significantly increase ETD detection scope. Data Access logs are OFF by default.
+                </p>
+                {% for src in log_sources if src.category == 'recommended' %}
+                <div class="card p-3 mb-2 card-feature card-rec">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features"
+                               value="{{ src.key }}" id="{{ src.key }}"
+                               {{ 'checked' if src.key == 'dns' else '' }}>
+                        <label class="form-check-label" for="{{ src.key }}">
+                            <strong>{{ src.label }}</strong>
+                            {% if src.get('supports_sampling') %}
+                                <span class="badge bg-warning text-dark ms-1">Supports Sampling</span>
+                            {% endif %}
+                            <br>
+                            <small class="text-muted">{{ src.description }}</small>
+                        </label>
+                    </div>
+                </div>
+                {% endfor %}
+
+                <!-- VPC Flow Log Sampling -->
+                <div class="sampling-control mt-3 mb-4">
+                    <label class="form-label fw-bold mb-1">VPC Flow Log Sampling Rate</label>
+                    <div class="d-flex align-items-center gap-3">
+                        <input type="range" class="form-range flex-grow-1" name="vpc_sampling_rate"
+                               id="samplingSlider" min="0.1" max="1.0" step="0.1" value="0.5"
+                               oninput="document.getElementById('samplingVal').textContent = this.value">
+                        <span id="samplingVal" class="fw-bold" style="min-width:2.5rem">0.5</span>
+                    </div>
+                    <small class="text-muted">
+                        1.0 = full logging, 0.5 = 50% sampled, 0.1 = 10% sampled.
+                        Start high (0.5-1.0) for sensitive VPCs, lower for less critical subnets.
+                    </small>
+                </div>
+
+                <!-- OPTIONAL -->
+                <h5 class="mb-2">
+                    <span class="badge badge-opt text-white me-1">Optional</span>
+                    Environment-Specific
+                </h5>
+                {% for src in log_sources if src.category == 'optional' %}
+                <div class="card p-3 mb-2 card-feature card-opt">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="features"
+                               value="{{ src.key }}" id="{{ src.key }}" disabled>
+                        <label class="form-check-label" for="{{ src.key }}">
+                            <strong>{{ src.label }}</strong>
+                            {% if src.get('manual_only') %}
+                                <span class="badge bg-secondary ms-1">Manual Estimate Only</span>
+                            {% endif %}
+                            <br>
+                            <small class="text-muted">{{ src.description }}</small>
+                        </label>
+                    </div>
+                </div>
+                {% endfor %}
+
+                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold mt-4">
+                    Run Ingestion Estimate
+                </button>
+            </form>
+
+            <!-- ==================== RESULTS ==================== -->
+            {% if results %}
+            <div class="mt-5">
+
+                <!-- SINGLE PROJECT RESULTS -->
+                {% if results.scope == 'project' %}
+                <div class="card shadow p-4 border-primary">
+                    <h3>30-Day Projection: <code>{{ results.project_id }}</code></h3>
+                    <hr>
+                    {% if results.items %}
+                    <table class="table align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Log Source</th>
+                                <th>Category</th>
+                                <th class="text-end">Est. Volume</th>
+                                <th class="text-end">Est. Cost (USD)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in results.items %}
+                            <tr>
+                                <td>
+                                    {{ item.name }}
+                                    {% if item.always_on %}
+                                        <span class="badge bg-success ms-1">Always On</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if item.category == 'must_have' %}
+                                        <span class="badge badge-must text-white">Must Have</span>
+                                    {% elif item.category == 'recommended' %}
+                                        <span class="badge badge-rec text-white">Recommended</span>
+                                    {% else %}
+                                        <span class="badge badge-opt text-white">Optional</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">{{ item.volume_gib }} GiB</td>
+                                <td class="text-end fw-bold text-success">${{ item.cost }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    <div class="d-flex justify-content-between align-items-center pt-3 mt-3 border-top">
+                        <div>
+                            <span class="text-muted small">Based on $0.50/GiB standard Cloud Logging ingestion pricing.</span>
+                            {% if results.sampling_rate < 1.0 %}
+                            <br><span class="text-muted small">VPC Flow Logs sampled at {{ results.sampling_rate }}.</span>
+                            {% endif %}
+                        </div>
+                        <div class="text-end">
+                            <div class="text-muted small">Total Volume: {{ results.total_gib }} GiB</div>
+                            <h2 class="text-primary mb-0">Total: ${{ results.total_cost }}/mo</h2>
+                        </div>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No estimable log sources were selected.</p>
+                    {% endif %}
+                </div>
+
+                <!-- ORG / FOLDER RESULTS -->
+                {% elif results.scope in ('org', 'folder') %}
+                <div class="card shadow p-4 border-primary mb-4">
+                    <h3>
+                        30-Day Projection:
+                        {% if results.scope == 'org' %}
+                            Organization <code>{{ results.org_id }}</code>
+                        {% else %}
+                            Folder <code>{{ results.folder_id }}</code>
+                        {% endif %}
+                    </h3>
+                    <p class="text-muted">{{ results.project_count }} project(s) scanned</p>
+                    <hr>
+
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <span class="text-muted small">Based on $0.50/GiB standard Cloud Logging ingestion pricing.</span>
+                            {% if results.sampling_rate < 1.0 %}
+                            <br><span class="text-muted small">VPC Flow Logs sampled at {{ results.sampling_rate }}.</span>
+                            {% endif %}
+                        </div>
+                        <div class="text-end">
+                            <div class="text-muted small">Total Volume: {{ results.grand_total_gib }} GiB</div>
+                            <h2 class="text-primary mb-0">Grand Total: ${{ results.grand_total_cost }}/mo</h2>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Per-project breakdown -->
+                {% for proj in results.projects %}
+                <div class="card p-3 project-card">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <div>
+                            <strong>{{ proj.display_name }}</strong>
+                            <br><code class="small">{{ proj.project_id }}</code>
+                        </div>
+                        <div class="text-end">
+                            <span class="text-muted small">{{ proj.total_gib }} GiB</span>
+                            <br><strong class="text-primary">${{ proj.total_cost }}/mo</strong>
+                        </div>
+                    </div>
+                    {% if proj.items %}
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Log Source</th>
+                                <th class="text-end">Volume</th>
+                                <th class="text-end">Cost</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in proj.items %}
+                            <tr>
+                                <td class="small">
+                                    {{ item.name }}
+                                    {% if item.always_on %}
+                                        <span class="badge bg-success" style="font-size:0.65rem">Always On</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end small">{{ item.volume_gib }} GiB</td>
+                                <td class="text-end small">${{ item.cost }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% else %}
+                    <p class="text-muted small mb-0">No metric data returned.</p>
+                    {% endif %}
+                </div>
+                {% endfor %}
+
+                {% if not results.projects %}
+                <div class="alert alert-warning">
+                    No projects found. Verify the
+                    {% if results.scope == 'org' %}organization{% else %}folder{% endif %}
+                    ID and that your credentials have
+                    <code>resourcemanager.projects.list</code> permission.
+                </div>
+                {% endif %}
+
+                {% endif %}{# end scope check #}
+            </div>
+            {% endif %}
+
+            <footer class="text-center text-muted small mt-5 mb-3">
+                Estimates are projections based on 7-day metric baselines extrapolated to 30 days.
+                Actual costs may vary. VPC Flow Log estimates are rough approximations.
+            </footer>
         </div>
     </div>
 </div>
+
+<script>
+function updateScope() {
+    const scope = document.querySelector('input[name="scope"]:checked').value;
+    document.querySelectorAll('.scope-field').forEach(el => el.classList.remove('active'));
+    document.getElementById('field-' + scope).classList.add('active');
+}
+</script>
 </body>
 </html>
