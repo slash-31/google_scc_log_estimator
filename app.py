@@ -383,6 +383,7 @@ LOG_SOURCES = [
         "packets_per_record": 500,   # heuristic: ~500 pkts per record @ 5s agg
         "supports_sampling": True,   # UI shows sampling-rate slider
         "default_sampling": 0.5,     # pre-selected slider value
+        "network_log": True,         # billed at discounted $0.25/GiB rate
     },
     {
         "key": "gcs_data_access",
@@ -436,6 +437,7 @@ LOG_SOURCES = [
         # Proxy metric: NAT allocated port count as a rough activity proxy.
         "metric": "router.googleapis.com/nat/allocated_ports",
         "size_kb": 1.0,
+        "network_log": True,         # billed at discounted $0.25/GiB rate
     },
     {
         "key": "iap",
@@ -458,6 +460,7 @@ LOG_SOURCES = [
         ),
         "metric": "loadbalancing.googleapis.com/https/request_count",
         "size_kb": 1.0,
+        "network_log": True,         # billed at discounted $0.25/GiB rate
     },
     {
         "key": "artifact_registry",
@@ -491,6 +494,7 @@ LOG_SOURCE_MAP = {s["key"]: s for s in LOG_SOURCES}
 
 # Pricing and unit constants.
 COST_PER_GIB = 0.50           # standard Cloud Logging ingestion rate
+COST_PER_GIB_NETWORK = 0.25   # discounted rate for vended network logs
 KB_PER_GIB = 1_048_576        # 1024 * 1024
 BYTES_PER_GIB = 1_073_741_824 # 1024 ** 3
 
@@ -534,6 +538,131 @@ REQUIRED_IAM = [
             "Included in most viewer roles."
         ),
     },
+]
+
+
+# ---------------------------------------------------------------------------
+# Cloud Logging free-tier reference
+#
+# Some log types are always free (stored in the _Required bucket with 400-day
+# retention).  All other log types get a 50 GiB/project/month free allotment
+# before standard ingestion charges apply.
+#
+# This data is shown in the UI and the preflight output so users understand
+# which logs already flow at no cost vs. which ones will add to their bill.
+# ---------------------------------------------------------------------------
+FREE_TIER_LOGS = [
+    # -- Always free, unlimited volume, _Required bucket, 400-day retention --
+    {
+        "name": "Admin Activity Audit Logs",
+        "bucket": "_Required",
+        "retention": "400 days",
+        "cost": "Free (always)",
+        "coverage": (
+            "All administrative actions: IAM policy changes, resource "
+            "creation/deletion/modification, service account key operations. "
+            "Cannot be disabled."
+        ),
+    },
+    {
+        "name": "System Event Audit Logs",
+        "bucket": "_Required",
+        "retention": "400 days",
+        "cost": "Free (always)",
+        "coverage": (
+            "Google-initiated system events: automated resource migrations, "
+            "maintenance operations, quota adjustments, system-driven "
+            "configuration changes."
+        ),
+    },
+    {
+        "name": "Access Transparency Logs",
+        "bucket": "_Required",
+        "retention": "400 days",
+        "cost": "Free (always)",
+        "coverage": (
+            "Records when Google staff access your data for support cases "
+            "or service operations. Requires Access Transparency to be "
+            "enabled (available with Premium/Enterprise support)."
+        ),
+    },
+    {
+        "name": "Google Workspace Admin Audit Logs",
+        "bucket": "_Required",
+        "retention": "400 days",
+        "cost": "Free (always)",
+        "coverage": (
+            "Administrative actions in Google Workspace Admin Console: "
+            "user management, group changes, application settings, "
+            "domain-level configuration. Requires Workspace log streaming."
+        ),
+    },
+    {
+        "name": "Google Workspace Login Audit Logs",
+        "bucket": "_Required",
+        "retention": "400 days",
+        "cost": "Free (always)",
+        "coverage": (
+            "User sign-in events for Google Workspace: successful/failed "
+            "logins, suspicious login attempts, 2FA events. "
+            "Requires Workspace log streaming."
+        ),
+    },
+    {
+        "name": "Enterprise Groups Audit Logs",
+        "bucket": "_Required",
+        "retention": "400 days",
+        "cost": "Free (always)",
+        "coverage": (
+            "Changes to Google Groups membership and settings when managed "
+            "through Cloud Identity / Workspace."
+        ),
+    },
+]
+
+# Logs that are NOT free but have a per-project free allotment.
+PAID_LOG_TIERS = {
+    "standard": {
+        "free_allotment": "50 GiB/project/month",
+        "rate": "$0.50/GiB",
+        "bucket": "_Default or user-defined",
+        "default_retention": "30 days",
+        "extended_retention_cost": "$0.01/GiB/month",
+        "examples": [
+            "Data Access Audit Logs",
+            "Cloud DNS Logs",
+            "Firewall Rules Logs",
+            "Cloud NAT Logs",
+            "IAP Access Logs",
+            "Artifact Registry Audit Logs",
+            "Application / platform logs",
+        ],
+    },
+    "network": {
+        "free_allotment": "Included in standard 50 GiB",
+        "rate": "$0.25/GiB (discounted)",
+        "bucket": "_Default or user-defined",
+        "default_retention": "30 days",
+        "extended_retention_cost": "$0.01/GiB/month",
+        "examples": [
+            "VPC Flow Logs",
+            "HTTP(S) Load Balancer Logs",
+            "Cloud NAT Logs",
+            "Network Intelligence Center logs",
+        ],
+        "note": (
+            "Vended network telemetry logs are billed at a discounted rate "
+            "of $0.25/GiB instead of the standard $0.50/GiB."
+        ),
+    },
+}
+
+# Items that are always free regardless (no charge for API usage).
+FREE_OPERATIONS = [
+    "Log routing (forwarding to any supported destination)",
+    "Cloud Logging API calls",
+    "Creating log scopes and analytics views",
+    "Log Analytics SQL queries",
 ]
 
 
@@ -777,6 +906,7 @@ def estimate_project(project_id, selected_keys, sampling_rate):
     """
     estimates = []
     total_gib = 0
+    total_cost = 0
 
     for key in selected_keys:
         source = LOG_SOURCE_MAP.get(key)
@@ -786,7 +916,11 @@ def estimate_project(project_id, selected_keys, sampling_rate):
         # Fetch 7-day baseline and extrapolate.
         raw_7d = fetch_metric_7d(project_id, source)
         gib = estimate_monthly_gib(source, raw_7d, sampling_rate)
-        cost = gib * COST_PER_GIB
+
+        # Network telemetry logs (VPC Flow, LB, NAT) are billed at a
+        # discounted rate of $0.25/GiB vs. the standard $0.50/GiB.
+        rate = COST_PER_GIB_NETWORK if source.get("network_log") else COST_PER_GIB
+        cost = gib * rate
 
         # Track whether the metric returned any data so the UI can
         # distinguish "0 volume" from "no metric data available".
@@ -799,10 +933,12 @@ def estimate_project(project_id, selected_keys, sampling_rate):
             "cost": round(cost, 2),
             "always_on": source.get("always_on", False),
             "has_data": has_data,
+            "network_log": source.get("network_log", False),
         })
         total_gib += gib
+        total_cost += cost
 
-    return estimates, total_gib
+    return estimates, total_gib, total_cost
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +970,7 @@ def index():
 
         # -- Single-project scope --
         if scope == "project":
-            estimates, total_gib = estimate_project(
+            estimates, total_gib, total_cost = estimate_project(
                 project_id, selected_keys, sampling_rate
             )
             results = {
@@ -842,14 +978,14 @@ def index():
                 "project_id": project_id,
                 "estimates": estimates,
                 "total_gib": round(total_gib, 3),
-                "total_cost": round(total_gib * COST_PER_GIB, 2),
+                "total_cost": round(total_cost, 2),
                 "sampling_rate": sampling_rate,
             }
 
         # -- Organization-wide scope --
         elif scope == "org":
             projects = list_org_projects(org_id)
-            project_results, grand_total_gib = _scan_projects(
+            project_results, grand_total_gib, grand_total_cost = _scan_projects(
                 projects, selected_keys, sampling_rate
             )
             results = {
@@ -858,14 +994,14 @@ def index():
                 "projects": project_results,
                 "project_count": len(projects),
                 "grand_total_gib": round(grand_total_gib, 3),
-                "grand_total_cost": round(grand_total_gib * COST_PER_GIB, 2),
+                "grand_total_cost": round(grand_total_cost, 2),
                 "sampling_rate": sampling_rate,
             }
 
         # -- Folder scope --
         elif scope == "folder":
             projects = list_folder_projects(folder_id)
-            project_results, grand_total_gib = _scan_projects(
+            project_results, grand_total_gib, grand_total_cost = _scan_projects(
                 projects, selected_keys, sampling_rate
             )
             results = {
@@ -874,7 +1010,7 @@ def index():
                 "projects": project_results,
                 "project_count": len(projects),
                 "grand_total_gib": round(grand_total_gib, 3),
-                "grand_total_cost": round(grand_total_gib * COST_PER_GIB, 2),
+                "grand_total_cost": round(grand_total_cost, 2),
                 "sampling_rate": sampling_rate,
             }
 
@@ -884,6 +1020,9 @@ def index():
         log_sources=LOG_SOURCES,
         auth_info=auth_info,
         required_iam=REQUIRED_IAM,
+        free_tier_logs=FREE_TIER_LOGS,
+        paid_log_tiers=PAID_LOG_TIERS,
+        free_operations=FREE_OPERATIONS,
     )
 
 
@@ -896,16 +1035,19 @@ def _scan_projects(projects, selected_keys, sampling_rate):
         sampling_rate: VPC Flow Log sampling rate.
 
     Returns:
-        Tuple of (project_results, grand_total_gib).
+        Tuple of (project_results, grand_total_gib, grand_total_cost).
     """
     project_results = []
     grand_total_gib = 0
+    grand_total_cost = 0
 
     for proj in projects:
         pid = proj["project_id"]
-        estimates, proj_gib = estimate_project(pid, selected_keys, sampling_rate)
-        proj_cost = proj_gib * COST_PER_GIB
+        estimates, proj_gib, proj_cost = estimate_project(
+            pid, selected_keys, sampling_rate
+        )
         grand_total_gib += proj_gib
+        grand_total_cost += proj_cost
         project_results.append({
             "project_id": pid,
             "display_name": proj["display_name"],
@@ -914,7 +1056,7 @@ def _scan_projects(projects, selected_keys, sampling_rate):
             "total_cost": round(proj_cost, 2),
         })
 
-    return project_results, grand_total_gib
+    return project_results, grand_total_gib, grand_total_cost
 
 
 # ---------------------------------------------------------------------------

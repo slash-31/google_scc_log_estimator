@@ -119,6 +119,101 @@
             </div>
             {% endif %}
 
+            <!-- Free-Tier Log Sources (collapsible) -->
+            {% if free_tier_logs %}
+            <div class="card mb-4">
+                <div class="card-header p-2">
+                    <button class="btn btn-sm btn-link text-decoration-none w-100 text-start"
+                            type="button" data-bs-toggle="collapse" data-bs-target="#freeTierPanel">
+                        <strong>Cloud Logging Pricing &amp; Free-Tier Log Sources</strong>
+                        <span class="text-muted ms-2">(click to expand)</span>
+                    </button>
+                </div>
+                <div class="collapse" id="freeTierPanel">
+                    <div class="card-body p-3">
+
+                        <!-- Always-free logs -->
+                        <h6 class="text-success">Always Free &mdash; Unlimited Volume</h6>
+                        <p class="small text-muted mb-2">
+                            These logs are stored in the <code>_Required</code> bucket with a fixed
+                            400-day retention period.  They cannot be disabled and incur
+                            <strong>no ingestion or storage charges</strong> regardless of volume.
+                        </p>
+                        <table class="table table-sm small mb-4">
+                            <thead>
+                                <tr>
+                                    <th>Log Source</th>
+                                    <th>Retention</th>
+                                    <th>What It Covers</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for log in free_tier_logs %}
+                                <tr>
+                                    <td class="fw-bold">{{ log.name }}</td>
+                                    <td><span class="badge bg-success">{{ log.retention }}</span></td>
+                                    <td>{{ log.coverage }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+
+                        <!-- Paid tiers -->
+                        <h6 class="text-primary">Paid Log Types</h6>
+                        <p class="small text-muted mb-2">
+                            All other logs are stored in the <code>_Default</code> or user-defined
+                            buckets with a default 30-day retention.  The first
+                            <strong>50 GiB per project per month</strong> is free.
+                        </p>
+                        <table class="table table-sm small mb-3">
+                            <thead>
+                                <tr>
+                                    <th>Tier</th>
+                                    <th>Rate</th>
+                                    <th>Free Allotment</th>
+                                    <th>Retention</th>
+                                    <th>Examples</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for tier_name, tier in paid_log_tiers.items() %}
+                                <tr>
+                                    <td class="fw-bold text-capitalize">{{ tier_name }}</td>
+                                    <td>{{ tier.rate }}</td>
+                                    <td>{{ tier.free_allotment }}</td>
+                                    <td>{{ tier.default_retention }}</td>
+                                    <td>
+                                        {% for ex in tier.examples %}
+                                            <span class="d-inline-block me-1 mb-1">
+                                                <span class="badge bg-light text-dark border">{{ ex }}</span>
+                                            </span>
+                                        {% endfor %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        {% if paid_log_tiers.get('network', {}).get('note') %}
+                        <div class="alert alert-warning small py-2 mb-3">
+                            {{ paid_log_tiers.network.note }}
+                        </div>
+                        {% endif %}
+
+                        <!-- Always-free operations -->
+                        {% if free_operations %}
+                        <h6 class="text-secondary">Always Free Operations (no charge)</h6>
+                        <ul class="small mb-0">
+                            {% for op in free_operations %}
+                            <li>{{ op }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- SHA info -->
             <div class="alert alert-info mb-4">
                 <strong>About SHA:</strong> Security Health Analytics analyzes resource configurations from
@@ -301,14 +396,19 @@
                                     {% endif %}
                                 </td>
                                 <td class="text-end">{{ item.volume_gib }} GiB</td>
-                                <td class="text-end fw-bold text-success">${{ item.cost }}</td>
+                                <td class="text-end fw-bold text-success">
+                                    ${{ item.cost }}
+                                    {% if item.network_log %}
+                                        <br><span class="badge bg-info text-dark" style="font-size:0.6rem">$0.25/GiB</span>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                     <div class="d-flex justify-content-between align-items-center pt-3 mt-3 border-top">
                         <div>
-                            <span class="text-muted small">Based on $0.50/GiB standard Cloud Logging ingestion pricing.</span>
+                            <span class="text-muted small">$0.50/GiB standard rate. Network logs (VPC Flow, LB, NAT) at $0.25/GiB.</span>
                             {% if results.sampling_rate < 1.0 %}
                             <br><span class="text-muted small">VPC Flow Logs sampled at {{ results.sampling_rate }}.</span>
                             {% endif %}
@@ -351,7 +451,7 @@
 
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
-                            <span class="text-muted small">Based on $0.50/GiB standard Cloud Logging ingestion pricing.</span>
+                            <span class="text-muted small">$0.50/GiB standard rate. Network logs (VPC Flow, LB, NAT) at $0.25/GiB.</span>
                             {% if results.sampling_rate < 1.0 %}
                             <br><span class="text-muted small">VPC Flow Logs sampled at {{ results.sampling_rate }}.</span>
                             {% endif %}
