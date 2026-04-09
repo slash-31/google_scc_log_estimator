@@ -40,6 +40,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request
 
@@ -511,6 +512,40 @@ COST_PER_GIB_NETWORK = 0.25   # discounted rate for vended network logs
 KB_PER_GIB = 1_048_576        # 1024 * 1024
 BYTES_PER_GIB = 1_073_741_824 # 1024 ** 3
 
+# Concurrency: max parallel Cloud Monitoring API calls.
+# Each call is I/O-bound (network), so threads work well.
+MAX_WORKERS = 10
+
+# Shared API clients — reused across requests to avoid per-call overhead
+# from channel creation and auth token refresh.
+_monitoring_client = None
+_projects_client = None
+_folders_client = None
+
+
+def _get_monitoring_client():
+    """Return a shared MetricServiceClient (created once, reused)."""
+    global _monitoring_client
+    if _monitoring_client is None:
+        _monitoring_client = monitoring_v3.MetricServiceClient()
+    return _monitoring_client
+
+
+def _get_projects_client():
+    """Return a shared ProjectsClient (created once, reused)."""
+    global _projects_client
+    if _projects_client is None:
+        _projects_client = resourcemanager_v3.ProjectsClient()
+    return _projects_client
+
+
+def _get_folders_client():
+    """Return a shared FoldersClient (created once, reused)."""
+    global _folders_client
+    if _folders_client is None:
+        _folders_client = resourcemanager_v3.FoldersClient()
+    return _folders_client
+
 # ---------------------------------------------------------------------------
 # Required IAM roles and permissions
 #
@@ -748,7 +783,7 @@ def _list_folders_recursive(parent_name):
     Returns:
         List of folder resource names (e.g. ``["folders/111", "folders/222"]``).
     """
-    client = resourcemanager_v3.FoldersClient()
+    client = _get_folders_client()
     found = []
     try:
         for folder in client.list_folders(parent=parent_name):
@@ -768,7 +803,7 @@ def list_org_projects(org_id):
     Requires ``resourcemanager.projects.list`` on the organization and
     ``resourcemanager.folders.list`` for folder traversal.
     """
-    projects_client = resourcemanager_v3.ProjectsClient()
+    projects_client = _get_projects_client()
     projects = []
 
     # Collect all parents to scan: the org itself + every nested folder.
@@ -800,7 +835,7 @@ def list_folder_projects(folder_id):
     Requires ``resourcemanager.projects.list`` and
     ``resourcemanager.folders.list`` on the folder.
     """
-    projects_client = resourcemanager_v3.ProjectsClient()
+    projects_client = _get_projects_client()
     projects = []
 
     # Collect: the folder itself + every nested sub-folder.
@@ -842,7 +877,7 @@ def fetch_metric_7d(project_id, source):
     if source.get("manual_only"):
         return 0
 
-    client = monitoring_v3.MetricServiceClient()
+    client = _get_monitoring_client()
     project_name = f"projects/{project_id}"
 
     # 7-day window ending now.
@@ -950,39 +985,58 @@ def estimate_monthly_gib(source, raw_7d_total, sampling_rate=1.0):
 def estimate_project(project_id, selected_keys, sampling_rate):
     """Run cost estimates for every selected log source in a single project.
 
+    Metric fetches are parallelized using a thread pool — all selected log
+    sources are queried concurrently, which is the main performance win for
+    single-project scans.
+
     Args:
         project_id:    GCP project ID to scan.
         selected_keys: List of ``LOG_SOURCES`` key strings chosen by the user.
         sampling_rate: VPC Flow Log sampling rate (0.0–1.0).
 
     Returns:
-        Tuple of (estimates, total_gib) where *estimates* is a list of
-        per-source result dicts and *total_gib* is the aggregate volume.
+        Tuple of (estimates, total_gib, total_cost).
 
     Note:
         The result key is called ``estimates`` (not ``items``) to avoid
         colliding with Python's ``dict.items()`` method in Jinja2 templates.
     """
+    # Filter to valid, estimable sources first.
+    sources = []
+    for key in selected_keys:
+        source = LOG_SOURCE_MAP.get(key)
+        if source and not source.get("manual_only"):
+            sources.append(source)
+
+    if not sources:
+        return [], 0, 0
+
+    # Fetch all metrics in parallel.
+    raw_results = {}  # key → raw 7-day total
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_key = {
+            pool.submit(fetch_metric_7d, project_id, src): src["key"]
+            for src in sources
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                raw_results[key] = future.result()
+            except Exception as exc:
+                print(f"[error] thread exception for {key}: {exc}")
+                raw_results[key] = 0
+
+    # Build the estimates list (preserves original selection order).
     estimates = []
     total_gib = 0
     total_cost = 0
 
-    for key in selected_keys:
-        source = LOG_SOURCE_MAP.get(key)
-        if not source or source.get("manual_only"):
-            continue
-
-        # Fetch 7-day baseline and extrapolate.
-        raw_7d = fetch_metric_7d(project_id, source)
+    for source in sources:
+        raw_7d = raw_results.get(source["key"], 0)
         gib = estimate_monthly_gib(source, raw_7d, sampling_rate)
 
-        # Network telemetry logs (VPC Flow, LB, NAT) are billed at a
-        # discounted rate of $0.25/GiB vs. the standard $0.50/GiB.
         rate = COST_PER_GIB_NETWORK if source.get("network_log") else COST_PER_GIB
         cost = gib * rate
-
-        # Track whether the metric returned any data so the UI can
-        # distinguish "0 volume" from "no metric data available".
         has_data = raw_7d > 0
 
         estimates.append({
@@ -1090,7 +1144,11 @@ def index():
 
 
 def _scan_projects(projects, selected_keys, sampling_rate):
-    """Iterate a list of discovered projects and collect per-project estimates.
+    """Scan multiple projects in parallel and collect per-project estimates.
+
+    Each project's metrics are already fetched concurrently inside
+    ``estimate_project``.  This function adds a second level of parallelism
+    by running multiple projects simultaneously.
 
     Args:
         projects:      List of ``{project_id, display_name}`` dicts.
@@ -1100,24 +1158,52 @@ def _scan_projects(projects, selected_keys, sampling_rate):
     Returns:
         Tuple of (project_results, grand_total_gib, grand_total_cost).
     """
-    project_results = []
-    grand_total_gib = 0
-    grand_total_cost = 0
+    if not projects:
+        return [], 0, 0
 
-    for proj in projects:
+    start = time.time()
+    # Map: project_id → (display_name, estimates, gib, cost)
+    results_by_pid = {}
+
+    def _estimate_one(proj):
         pid = proj["project_id"]
         estimates, proj_gib, proj_cost = estimate_project(
             pid, selected_keys, sampling_rate
         )
+        return pid, proj["display_name"], estimates, proj_gib, proj_cost
+
+    # Run projects in parallel (capped to avoid overwhelming the API).
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(_estimate_one, p): p for p in projects}
+        for future in as_completed(futures):
+            try:
+                pid, name, estimates, gib, cost = future.result()
+                results_by_pid[pid] = (name, estimates, gib, cost)
+            except Exception as exc:
+                proj = futures[future]
+                print(f"[error] scanning {proj['project_id']}: {exc}")
+
+    # Rebuild in the original project order.
+    project_results = []
+    grand_total_gib = 0
+    grand_total_cost = 0
+    for proj in projects:
+        pid = proj["project_id"]
+        if pid not in results_by_pid:
+            continue
+        name, estimates, proj_gib, proj_cost = results_by_pid[pid]
         grand_total_gib += proj_gib
         grand_total_cost += proj_cost
         project_results.append({
             "project_id": pid,
-            "display_name": proj["display_name"],
+            "display_name": name,
             "estimates": estimates,
             "total_gib": round(proj_gib, 3),
             "total_cost": round(proj_cost, 2),
         })
+
+    elapsed = time.time() - start
+    print(f"[perf] scanned {len(project_results)} project(s) in {elapsed:.1f}s")
 
     return project_results, grand_total_gib, grand_total_cost
 
@@ -1147,7 +1233,7 @@ def _check_monitoring_api(project_id):
     Returns (ok: bool, detail: str).
     """
     try:
-        client = monitoring_v3.MetricServiceClient()
+        client = _get_monitoring_client()
         # list_time_series with an impossible metric type — we only care
         # whether the API responds (200/403/404) vs rejects (permission
         # denied or API-not-enabled).
@@ -1189,7 +1275,7 @@ def _check_resource_manager_api(project_id):
     Returns (ok: bool, detail: str).
     """
     try:
-        client = resourcemanager_v3.ProjectsClient()
+        client = _get_projects_client()
         # Just try to get the project — lightweight read.
         client.get_project(name=f"projects/{project_id}")
         return True, "OK"
@@ -1231,7 +1317,7 @@ def _check_iam_permissions(project_id):
                 perm_to_role[perm] = entry["role"]
 
     try:
-        client = resourcemanager_v3.ProjectsClient()
+        client = _get_projects_client()
         response = client.test_iam_permissions(
             resource=f"projects/{project_id}",
             permissions=perms_to_test,
