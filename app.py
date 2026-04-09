@@ -57,6 +57,10 @@ from google.auth.transport.requests import Request as AuthRequest
 os.environ.setdefault("GRPC_POLL_STRATEGY", "epoll1")
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -342,12 +346,13 @@ LOG_SOURCES = [
             "Detects unauthorized config changes, service account manipulation, "
             "and privilege escalation. Always enabled."
         ),
-        # Use byte_count so we report *actual* ingestion, not an estimate.
-        "metric": "logging.googleapis.com/byte_count",
+        # Use log_entry_count so we can reliably query always-on audit logs.
+        # The "log" label uses URL-encoded log IDs (same as Cloud Logging API).
+        "metric": "logging.googleapis.com/log_entry_count",
         "metric_label_filter": (
             'metric.label."log" = "cloudaudit.googleapis.com%2Factivity"'
         ),
-        "use_bytes": True,   # metric value is raw bytes — no KB multiplier
+        "size_kb": 1.0,      # avg ~1 KB per admin activity entry
         "always_on": True,
     },
     {
@@ -355,11 +360,11 @@ LOG_SOURCES = [
         "label": "Cloud Audit Logs — System Event",
         "category": "must_have",
         "description": "Google Cloud system actions on your resources. Always enabled.",
-        "metric": "logging.googleapis.com/byte_count",
+        "metric": "logging.googleapis.com/log_entry_count",
         "metric_label_filter": (
             'metric.label."log" = "cloudaudit.googleapis.com%2Fsystem_event"'
         ),
-        "use_bytes": True,
+        "size_kb": 0.8,      # avg ~800 bytes per system event entry
         "always_on": True,
     },
 
@@ -530,10 +535,12 @@ REQUIRED_IAM = [
         "permissions": [
             "resourcemanager.projects.list",
             "resourcemanager.projects.get",
+            "resourcemanager.folders.list",
         ],
         "scope": "org",
         "reason": (
-            "Discover projects under an organization or folder. "
+            "Discover projects and folders under an organization or folder. "
+            "Folders are enumerated recursively to find nested projects. "
             "Only required for org-wide or folder-wide scans."
         ),
     },
@@ -732,43 +739,87 @@ def get_auth_info():
 # Org / folder project discovery
 # ---------------------------------------------------------------------------
 
+def _list_folders_recursive(parent_name):
+    """Recursively enumerate all folder IDs under *parent_name*.
+
+    Args:
+        parent_name: Resource name like ``organizations/123`` or ``folders/456``.
+
+    Returns:
+        List of folder resource names (e.g. ``["folders/111", "folders/222"]``).
+    """
+    client = resourcemanager_v3.FoldersClient()
+    found = []
+    try:
+        for folder in client.list_folders(parent=parent_name):
+            found.append(folder.name)
+            # Recurse into sub-folders.
+            found.extend(_list_folders_recursive(folder.name))
+    except Exception as exc:
+        print(f"[warn] listing sub-folders of {parent_name}: {exc}")
+    return found
+
+
 def list_org_projects(org_id):
     """Return a list of ``{project_id, display_name}`` dicts for every active
-    project directly or transitively under *org_id*.
+    project under *org_id*, including projects nested inside sub-folders at
+    any depth.
 
-    Requires ``resourcemanager.projects.list`` on the organization.
+    Requires ``resourcemanager.projects.list`` on the organization and
+    ``resourcemanager.folders.list`` for folder traversal.
     """
-    client = resourcemanager_v3.ProjectsClient()
-    query = f"parent=organizations/{org_id} state:ACTIVE"
+    projects_client = resourcemanager_v3.ProjectsClient()
     projects = []
-    try:
-        for project in client.search_projects(query=query):
-            projects.append({
-                "project_id": project.project_id,
-                "display_name": project.display_name,
-            })
-    except Exception as exc:
-        print(f"[error] listing org projects: {exc}")
+
+    # Collect all parents to scan: the org itself + every nested folder.
+    parents = [f"organizations/{org_id}"]
+    parents.extend(_list_folders_recursive(f"organizations/{org_id}"))
+    print(f"[info] org scan: found {len(parents)} parent(s) to search "
+          f"(1 org + {len(parents) - 1} folders)")
+
+    for parent in parents:
+        try:
+            query = f"parent={parent} state:ACTIVE"
+            for project in projects_client.search_projects(query=query):
+                projects.append({
+                    "project_id": project.project_id,
+                    "display_name": project.display_name,
+                })
+        except Exception as exc:
+            print(f"[error] listing projects under {parent}: {exc}")
+
+    print(f"[info] org scan: found {len(projects)} active project(s) total")
     return projects
 
 
 def list_folder_projects(folder_id):
     """Return a list of ``{project_id, display_name}`` dicts for every active
-    project directly or transitively under *folder_id*.
+    project under *folder_id*, including projects nested in sub-folders at
+    any depth.
 
-    Requires ``resourcemanager.projects.list`` on the folder.
+    Requires ``resourcemanager.projects.list`` and
+    ``resourcemanager.folders.list`` on the folder.
     """
-    client = resourcemanager_v3.ProjectsClient()
-    query = f"parent=folders/{folder_id} state:ACTIVE"
+    projects_client = resourcemanager_v3.ProjectsClient()
     projects = []
-    try:
-        for project in client.search_projects(query=query):
-            projects.append({
-                "project_id": project.project_id,
-                "display_name": project.display_name,
-            })
-    except Exception as exc:
-        print(f"[error] listing folder projects: {exc}")
+
+    # Collect: the folder itself + every nested sub-folder.
+    parents = [f"folders/{folder_id}"]
+    parents.extend(_list_folders_recursive(f"folders/{folder_id}"))
+    print(f"[info] folder scan: found {len(parents)} parent(s) to search")
+
+    for parent in parents:
+        try:
+            query = f"parent={parent} state:ACTIVE"
+            for project in projects_client.search_projects(query=query):
+                projects.append({
+                    "project_id": project.project_id,
+                    "display_name": project.display_name,
+                })
+        except Exception as exc:
+            print(f"[error] listing projects under {parent}: {exc}")
+
+    print(f"[info] folder scan: found {len(projects)} active project(s) total")
     return projects
 
 
@@ -806,6 +857,8 @@ def fetch_metric_7d(project_id, source):
     if source.get("metric_label_filter"):
         api_filter += f' AND {source["metric_label_filter"]}'
 
+    print(f"[metric] {project_id}: {api_filter}")
+
     try:
         results = client.list_time_series(
             name=project_name,
@@ -815,37 +868,35 @@ def fetch_metric_7d(project_id, source):
         )
         # Sum across all returned time-series and their data points.
         total = 0
+        series_count = 0
         for series in results:
+            series_count += 1
             for point in series.points:
                 # Metrics may report int64 or double; take whichever is non-zero.
                 total += point.value.int64_value or point.value.double_value
+
+        print(f"[metric] {project_id}: {source['metric']} → "
+              f"{series_count} series, total={total}")
         return total
 
     except NotFound:
         # 404 = the metric type doesn't exist in this project.  This is
         # expected when the corresponding GCP service is not in use (e.g.
-        # no Cloud DNS zones, no Cloud SQL instances).  Silently return 0
-        # so the UI shows "No data" instead of an error.
-        logger.info(
-            "No metric data for %s in %s (service likely not in use)",
-            source["metric"], project_id,
-        )
+        # no Cloud DNS zones, no Cloud SQL instances).
+        print(f"[metric] {project_id}: {source['metric']} → "
+              f"no data (service not in use)")
         return 0
 
     except GoogleAPICallError as exc:
         # Real API errors (permission denied, quota, server errors).
-        logger.warning(
-            "API error fetching %s for %s: %s",
-            source["metric"], project_id, exc,
-        )
+        print(f"[metric] {project_id}: {source['metric']} → "
+              f"API ERROR: {exc}")
         return 0
 
     except Exception as exc:
-        # Unexpected errors — log the full traceback for debugging.
-        logger.exception(
-            "Unexpected error fetching %s for %s",
-            source["metric"], project_id,
-        )
+        # Unexpected errors.
+        print(f"[metric] {project_id}: {source['metric']} → "
+              f"UNEXPECTED ERROR: {exc}")
         return 0
 
 
