@@ -48,6 +48,7 @@ from flask import Flask, render_template, request
 # surface immediately rather than at first request time.
 from google.cloud import monitoring_v3
 from google.cloud import resourcemanager_v3
+from google.cloud import asset_v1
 from google.api_core.exceptions import NotFound, GoogleAPICallError
 from google.auth import default as get_default_credentials
 from google.auth.exceptions import DefaultCredentialsError
@@ -355,6 +356,7 @@ LOG_SOURCES = [
         ),
         "size_kb": 1.0,      # avg ~1 KB per admin activity entry
         "always_on": True,
+        # No asset_types — always-on logs apply to every project.
     },
     {
         "key": "system_event",
@@ -365,7 +367,7 @@ LOG_SOURCES = [
         "metric_label_filter": (
             'metric.label."log" = "cloudaudit.googleapis.com%2Fsystem_event"'
         ),
-        "size_kb": 0.8,      # avg ~800 bytes per system event entry
+        "size_kb": 0.8,
         "always_on": True,
     },
 
@@ -378,9 +380,10 @@ LOG_SOURCES = [
             "Detects DNS tunneling, C2 beaconing, and cryptomining pool "
             "connections.  Enable on all VPC networks."
         ),
-        # Proxy metric: each DNS query ≈ one log entry.
         "metric": "dns.googleapis.com/query/count",
-        "size_kb": 0.5,   # avg ~500 bytes per DNS log entry
+        "size_kb": 0.5,
+        # Cloud Asset types that indicate DNS is in use.
+        "asset_types": ["dns.googleapis.com/ManagedZone"],
     },
     {
         "key": "vpc_flow",
@@ -391,22 +394,25 @@ LOG_SOURCES = [
             "ETD already analyzes an internal VPC Flow data stream at no cost, "
             "but exporting to Cloud Logging lets you query raw flow data."
         ),
-        # Proxy metric: packet count → estimated flow records.
         "metric": "compute.googleapis.com/instance/network/received_packets_count",
-        "size_kb": 1.5,              # avg ~1.5 KB per flow-log record
-        "packets_per_record": 500,   # heuristic: ~500 pkts per record @ 5s agg
-        "supports_sampling": True,   # UI shows sampling-rate slider
-        "default_sampling": 0.5,     # pre-selected slider value
-        "network_log": True,         # billed at discounted $0.25/GiB rate
+        "size_kb": 1.5,
+        "packets_per_record": 500,
+        "supports_sampling": True,
+        "default_sampling": 0.5,
+        "network_log": True,
+        "asset_types": [
+            "compute.googleapis.com/Instance",
+            "compute.googleapis.com/Subnetwork",
+        ],
     },
     {
         "key": "gcs_data_access",
         "label": "GCS Data Access Audit Logs",
         "category": "recommended",
         "description": "Tracks who reads/downloads files in Cloud Storage buckets.",
-        # Proxy metric: each GCS API call ≈ one audit-log entry.
         "metric": "storage.googleapis.com/api/request_count",
-        "size_kb": 1.5,   # Data Access entries carry identity + resource metadata
+        "size_kb": 1.5,
+        "asset_types": ["storage.googleapis.com/Bucket"],
     },
     {
         "key": "bq_data_access",
@@ -418,15 +424,16 @@ LOG_SOURCES = [
         ),
         "metric": "bigquery.googleapis.com/query/count",
         "size_kb": 1.2,
+        "asset_types": ["bigquery.googleapis.com/Dataset"],
     },
     {
         "key": "cloudsql_data_access",
         "label": "Cloud SQL Data Access Audit Logs",
         "category": "recommended",
         "description": "Monitors database connections for unauthorized data access.",
-        # Proxy metric: connection count as a rough lower bound.
         "metric": "cloudsql.googleapis.com/database/network/connections",
         "size_kb": 1.0,
+        "asset_types": ["sqladmin.googleapis.com/Instance"],
     },
     {
         "key": "firewall",
@@ -436,9 +443,9 @@ LOG_SOURCES = [
             "Logs allowed/denied connections per firewall rule. Critical for "
             "detecting lateral movement and policy violations."
         ),
-        # Proxy metric: firewall rule hit count — each hit ≈ one log entry.
         "metric": "firewallinsights.googleapis.com/subnet/firewall_hit_count",
         "size_kb": 1.0,
+        "asset_types": ["compute.googleapis.com/Firewall"],
     },
     {
         "key": "cloud_nat",
@@ -448,10 +455,10 @@ LOG_SOURCES = [
             "Logs NAT translation events. Helps detect outbound data exfiltration "
             "and unexpected egress traffic from private VMs."
         ),
-        # Proxy metric: NAT allocated port count as a rough activity proxy.
         "metric": "router.googleapis.com/nat/allocated_ports",
         "size_kb": 1.0,
-        "network_log": True,         # billed at discounted $0.25/GiB rate
+        "network_log": True,
+        "asset_types": ["compute.googleapis.com/Router"],
     },
     {
         "key": "iap",
@@ -463,6 +470,7 @@ LOG_SOURCES = [
         ),
         "metric": "iap.googleapis.com/request_count",
         "size_kb": 0.7,
+        "asset_types": ["iap.googleapis.com/Brand"],
     },
     {
         "key": "lb",
@@ -474,7 +482,11 @@ LOG_SOURCES = [
         ),
         "metric": "loadbalancing.googleapis.com/https/request_count",
         "size_kb": 1.0,
-        "network_log": True,         # billed at discounted $0.25/GiB rate
+        "network_log": True,
+        "asset_types": [
+            "compute.googleapis.com/UrlMap",
+            "compute.googleapis.com/TargetHttpsProxy",
+        ],
     },
     {
         "key": "artifact_registry",
@@ -521,6 +533,7 @@ MAX_WORKERS = 10
 _monitoring_client = None
 _projects_client = None
 _folders_client = None
+_asset_client = None
 
 
 def _get_monitoring_client():
@@ -545,6 +558,14 @@ def _get_folders_client():
     if _folders_client is None:
         _folders_client = resourcemanager_v3.FoldersClient()
     return _folders_client
+
+
+def _get_asset_client():
+    """Return a shared AssetServiceClient (created once, reused)."""
+    global _asset_client
+    if _asset_client is None:
+        _asset_client = asset_v1.AssetServiceClient()
+    return _asset_client
 
 # ---------------------------------------------------------------------------
 # Required IAM roles and permissions
@@ -586,6 +607,16 @@ REQUIRED_IAM = [
         "reason": (
             "Read basic project metadata (used by preflight checks). "
             "Included in most viewer roles."
+        ),
+    },
+    {
+        "role": "roles/cloudasset.viewer",
+        "permissions": ["cloudasset.assets.searchAllResources"],
+        "scope": "project",
+        "reason": (
+            "Discover deployed resources via Cloud Asset Inventory. "
+            "Used to skip metric queries for unused services. "
+            "Falls back gracefully if not granted."
         ),
     },
 ]
@@ -859,6 +890,146 @@ def list_folder_projects(folder_id):
 
 
 # ---------------------------------------------------------------------------
+# Cloud Asset Inventory — resource discovery
+#
+# Uses the Cloud Asset API to discover what resources are actually deployed
+# in a project/org.  This lets us skip metric queries for services that
+# have zero resources (e.g. no Cloud SQL instances → skip cloudsql metrics).
+#
+# One API call returns all resource types, which is vastly more efficient
+# than querying each service API individually.
+# ---------------------------------------------------------------------------
+
+def _all_asset_types():
+    """Collect the unique set of Cloud Asset types across all LOG_SOURCES."""
+    types = set()
+    for src in LOG_SOURCES:
+        for at in src.get("asset_types", []):
+            types.add(at)
+    return sorted(types)
+
+
+def discover_assets(scope):
+    """Discover deployed resources using the Cloud Asset Inventory API.
+
+    Args:
+        scope: Resource scope — ``projects/my-project``,
+               ``organizations/123``, or ``folders/456``.
+
+    Returns:
+        dict mapping ``project_id`` → set of asset type strings found in
+        that project.  Example::
+
+            {"my-project": {"compute.googleapis.com/Instance",
+                            "storage.googleapis.com/Bucket"}}
+    """
+    client = _get_asset_client()
+    wanted_types = _all_asset_types()
+
+    # project_id → set of asset type strings
+    assets_by_project = {}
+
+    start = time.time()
+    try:
+        request = asset_v1.SearchAllResourcesRequest(
+            scope=scope,
+            asset_types=wanted_types,
+            # We only need the resource type and project, not full metadata.
+            read_mask="name,assetType,project",
+            page_size=500,
+        )
+        for resource in client.search_all_resources(request=request):
+            # resource.project is like "projects/12345" (numeric).
+            # Extract the project ID from the resource name instead.
+            # Resource names look like:
+            #   //compute.googleapis.com/projects/my-project/zones/...
+            #   //storage.googleapis.com/projects/_/buckets/my-bucket
+            project_id = _extract_project_id(resource.name, resource.project)
+            if project_id:
+                assets_by_project.setdefault(project_id, set())
+                assets_by_project[project_id].add(resource.asset_type)
+
+    except GoogleAPICallError as exc:
+        print(f"[asset] Cloud Asset API error for {scope}: {exc}")
+        print(f"[asset] Falling back to querying all metrics (slower).")
+        return None
+    except Exception as exc:
+        print(f"[asset] Unexpected error: {exc}")
+        print(f"[asset] Falling back to querying all metrics (slower).")
+        return None
+
+    elapsed = time.time() - start
+    total_types = sum(len(v) for v in assets_by_project.values())
+    print(f"[asset] Discovered {total_types} resource types across "
+          f"{len(assets_by_project)} project(s) in {elapsed:.1f}s")
+    for pid, types in sorted(assets_by_project.items()):
+        print(f"[asset]   {pid}: {', '.join(sorted(types))}")
+
+    return assets_by_project
+
+
+def _extract_project_id(resource_name, project_field):
+    """Extract the project ID from a Cloud Asset resource.
+
+    Args:
+        resource_name: Full resource name (e.g.
+            ``//compute.googleapis.com/projects/my-project/zones/...``).
+        project_field: The ``project`` field from the API response
+            (e.g. ``projects/123456``).
+
+    Returns:
+        str project ID or None.
+    """
+    # Try extracting from the resource name (most reliable for project ID).
+    # Pattern: //service/projects/{project_id}/...
+    if "/projects/" in resource_name:
+        parts = resource_name.split("/projects/", 1)
+        if len(parts) == 2:
+            pid = parts[1].split("/")[0]
+            # Skip numeric-only IDs (project numbers) — we want the string ID.
+            if pid and pid != "_":
+                return pid
+
+    # Fallback: use the project field (may be numeric).
+    if project_field and project_field.startswith("projects/"):
+        return project_field.split("/", 1)[1]
+
+    return None
+
+
+def should_query_metric(source, project_assets):
+    """Decide whether to query a metric based on discovered assets.
+
+    Args:
+        source:         One entry from ``LOG_SOURCES``.
+        project_assets: Set of asset type strings for this project,
+                        or None if asset discovery failed/was skipped.
+
+    Returns:
+        (should_query: bool, resource_count: int or None)
+    """
+    # Always query always-on logs (they have no asset_types filter).
+    if source.get("always_on"):
+        return True, None
+
+    # If asset discovery failed, fall back to querying everything.
+    if project_assets is None:
+        return True, None
+
+    # Check if any of the source's asset types were found.
+    source_types = source.get("asset_types", [])
+    if not source_types:
+        # No asset types defined — query the metric unconditionally.
+        return True, None
+
+    found = [t for t in source_types if t in project_assets]
+    if found:
+        return True, len(found)
+    else:
+        return False, 0
+
+
+# ---------------------------------------------------------------------------
 # Metric fetching and cost estimation
 # ---------------------------------------------------------------------------
 
@@ -982,26 +1153,25 @@ def estimate_monthly_gib(source, raw_7d_total, sampling_rate=1.0):
     return gib
 
 
-def estimate_project(project_id, selected_keys, sampling_rate):
+def estimate_project(project_id, selected_keys, sampling_rate,
+                     project_assets=None):
     """Run cost estimates for every selected log source in a single project.
 
-    Metric fetches are parallelized using a thread pool — all selected log
-    sources are queried concurrently, which is the main performance win for
-    single-project scans.
+    Uses Cloud Asset Inventory data (if available) to skip metrics for
+    services that have no deployed resources.  Remaining metrics are
+    fetched in parallel via a thread pool.
 
     Args:
-        project_id:    GCP project ID to scan.
-        selected_keys: List of ``LOG_SOURCES`` key strings chosen by the user.
-        sampling_rate: VPC Flow Log sampling rate (0.0–1.0).
+        project_id:     GCP project ID to scan.
+        selected_keys:  List of ``LOG_SOURCES`` key strings chosen by the user.
+        sampling_rate:  VPC Flow Log sampling rate (0.0–1.0).
+        project_assets: Set of asset type strings found in this project
+                        (from ``discover_assets``), or None to query all.
 
     Returns:
         Tuple of (estimates, total_gib, total_cost).
-
-    Note:
-        The result key is called ``estimates`` (not ``items``) to avoid
-        colliding with Python's ``dict.items()`` method in Jinja2 templates.
     """
-    # Filter to valid, estimable sources first.
+    # Filter to valid, estimable sources.
     sources = []
     for key in selected_keys:
         source = LOG_SOURCE_MAP.get(key)
@@ -1011,22 +1181,38 @@ def estimate_project(project_id, selected_keys, sampling_rate):
     if not sources:
         return [], 0, 0
 
-    # Fetch all metrics in parallel.
-    raw_results = {}  # key → raw 7-day total
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        future_to_key = {
-            pool.submit(fetch_metric_7d, project_id, src): src["key"]
-            for src in sources
-        }
-        for future in as_completed(future_to_key):
-            key = future_to_key[future]
-            try:
-                raw_results[key] = future.result()
-            except Exception as exc:
-                print(f"[error] thread exception for {key}: {exc}")
-                raw_results[key] = 0
+    # Decide which sources actually need a metric query based on assets.
+    sources_to_query = []
+    skipped_sources = []
+    for source in sources:
+        should_q, _count = should_query_metric(source, project_assets)
+        if should_q:
+            sources_to_query.append(source)
+        else:
+            skipped_sources.append(source)
 
-    # Build the estimates list (preserves original selection order).
+    if skipped_sources:
+        names = [s["label"] for s in skipped_sources]
+        print(f"[asset] {project_id}: skipping {len(names)} source(s) "
+              f"(no resources): {', '.join(names)}")
+
+    # Fetch metrics in parallel for sources that have deployed resources.
+    raw_results = {}
+    if sources_to_query:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            future_to_key = {
+                pool.submit(fetch_metric_7d, project_id, src): src["key"]
+                for src in sources_to_query
+            }
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    raw_results[key] = future.result()
+                except Exception as exc:
+                    print(f"[error] thread exception for {key}: {exc}")
+                    raw_results[key] = 0
+
+    # Build estimates (preserves original selection order).
     estimates = []
     total_gib = 0
     total_cost = 0
@@ -1039,6 +1225,10 @@ def estimate_project(project_id, selected_keys, sampling_rate):
         cost = gib * rate
         has_data = raw_7d > 0
 
+        # Determine resource status for UI.
+        was_skipped = source in skipped_sources
+        _, resource_count = should_query_metric(source, project_assets)
+
         estimates.append({
             "name": source["label"],
             "category": source["category"],
@@ -1047,6 +1237,8 @@ def estimate_project(project_id, selected_keys, sampling_rate):
             "always_on": source.get("always_on", False),
             "has_data": has_data,
             "network_log": source.get("network_log", False),
+            "skipped": was_skipped,
+            "resource_count": resource_count,
         })
         total_gib += gib
         total_cost += cost
@@ -1083,8 +1275,13 @@ def index():
 
         # -- Single-project scope --
         if scope == "project":
+            # Discover assets for this project (one API call).
+            assets = discover_assets(f"projects/{project_id}")
+            pa = assets.get(project_id) if assets else None
+
             estimates, total_gib, total_cost = estimate_project(
-                project_id, selected_keys, sampling_rate
+                project_id, selected_keys, sampling_rate,
+                project_assets=pa,
             )
             results = {
                 "scope": "project",
@@ -1097,9 +1294,14 @@ def index():
 
         # -- Organization-wide scope --
         elif scope == "org":
+            # One asset discovery call for the entire org — returns all
+            # resources across all projects, grouped by project.
+            assets = discover_assets(f"organizations/{org_id}")
+
             projects = list_org_projects(org_id)
             project_results, grand_total_gib, grand_total_cost = _scan_projects(
-                projects, selected_keys, sampling_rate
+                projects, selected_keys, sampling_rate,
+                assets_by_project=assets,
             )
             results = {
                 "scope": "org",
@@ -1113,9 +1315,12 @@ def index():
 
         # -- Folder scope --
         elif scope == "folder":
+            assets = discover_assets(f"folders/{folder_id}")
+
             projects = list_folder_projects(folder_id)
             project_results, grand_total_gib, grand_total_cost = _scan_projects(
-                projects, selected_keys, sampling_rate
+                projects, selected_keys, sampling_rate,
+                assets_by_project=assets,
             )
             results = {
                 "scope": "folder",
@@ -1143,7 +1348,8 @@ def index():
     )
 
 
-def _scan_projects(projects, selected_keys, sampling_rate):
+def _scan_projects(projects, selected_keys, sampling_rate,
+                   assets_by_project=None):
     """Scan multiple projects in parallel and collect per-project estimates.
 
     Each project's metrics are already fetched concurrently inside
@@ -1151,9 +1357,11 @@ def _scan_projects(projects, selected_keys, sampling_rate):
     by running multiple projects simultaneously.
 
     Args:
-        projects:      List of ``{project_id, display_name}`` dicts.
-        selected_keys: Log-source keys chosen by the user.
-        sampling_rate: VPC Flow Log sampling rate.
+        projects:          List of ``{project_id, display_name}`` dicts.
+        selected_keys:     Log-source keys chosen by the user.
+        sampling_rate:     VPC Flow Log sampling rate.
+        assets_by_project: Dict from ``discover_assets`` mapping project_id
+                           to set of asset types, or None.
 
     Returns:
         Tuple of (project_results, grand_total_gib, grand_total_cost).
@@ -1162,13 +1370,13 @@ def _scan_projects(projects, selected_keys, sampling_rate):
         return [], 0, 0
 
     start = time.time()
-    # Map: project_id → (display_name, estimates, gib, cost)
     results_by_pid = {}
 
     def _estimate_one(proj):
         pid = proj["project_id"]
+        pa = assets_by_project.get(pid) if assets_by_project else None
         estimates, proj_gib, proj_cost = estimate_project(
-            pid, selected_keys, sampling_rate
+            pid, selected_keys, sampling_rate, project_assets=pa
         )
         return pid, proj["display_name"], estimates, proj_gib, proj_cost
 
@@ -1223,6 +1431,11 @@ REQUIRED_APIS = [
         "name": "Cloud Resource Manager API",
         "service": "cloudresourcemanager.googleapis.com",
         "check": lambda pid: _check_resource_manager_api(pid),
+    },
+    {
+        "name": "Cloud Asset API",
+        "service": "cloudasset.googleapis.com",
+        "check": lambda pid: _check_asset_api(pid),
     },
 ]
 
@@ -1292,6 +1505,38 @@ def _check_resource_manager_api(project_id):
             return False, (
                 f"Permission denied. The authenticated identity needs "
                 f"resourcemanager.projects.get on project {project_id}."
+            )
+        return False, str(exc)
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _check_asset_api(project_id):
+    """Verify the Cloud Asset API is accessible (needed for resource discovery).
+
+    Returns (ok: bool, detail: str).
+    """
+    try:
+        client = _get_asset_client()
+        # Minimal search — just check if the API responds.
+        request = asset_v1.SearchAllResourcesRequest(
+            scope=f"projects/{project_id}",
+            asset_types=["compute.googleapis.com/Instance"],
+            page_size=1,
+        )
+        list(client.search_all_resources(request=request))
+        return True, "OK"
+    except GoogleAPICallError as exc:
+        if "has not been used" in str(exc) or "is not enabled" in str(exc):
+            return False, (
+                f"API not enabled. Run:\n"
+                f"  gcloud services enable cloudasset.googleapis.com "
+                f"--project={project_id}"
+            )
+        if "PERMISSION_DENIED" in str(exc) or exc.code == 403:
+            return False, (
+                f"Permission denied. The authenticated identity needs "
+                f"cloudasset.assets.searchAllResources."
             )
         return False, str(exc)
     except Exception as exc:

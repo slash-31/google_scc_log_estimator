@@ -110,7 +110,7 @@ source venv/bin/activate
 echo -e "${BLUE}Installing dependencies...${NC}"
 pip install --upgrade pip --quiet
 pip install flask google-cloud-monitoring google-cloud-resource-manager \
-            google-auth --quiet
+            google-cloud-asset google-auth --quiet
 
 # ===========================================================================
 # 5. Authentication Gate

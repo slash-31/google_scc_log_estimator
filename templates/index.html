@@ -415,8 +415,13 @@
                                     {% if item.always_on %}
                                         <span class="badge bg-success ms-1">Always On</span>
                                     {% endif %}
-                                    {% if not item.has_data %}
+                                    {% if item.skipped %}
+                                        <span class="badge bg-dark ms-1">No resources</span>
+                                    {% elif not item.has_data %}
                                         <span class="badge bg-secondary ms-1">No data</span>
+                                    {% endif %}
+                                    {% if item.resource_count is not none and item.resource_count > 0 %}
+                                        <span class="badge bg-info text-dark ms-1">{{ item.resource_count }} resource type(s)</span>
                                     {% endif %}
                                 </td>
                                 <td>
@@ -526,7 +531,9 @@
                                     {% if item.always_on %}
                                         <span class="badge bg-success" style="font-size:0.65rem">Always On</span>
                                     {% endif %}
-                                    {% if not item.has_data %}
+                                    {% if item.skipped %}
+                                        <span class="badge bg-dark" style="font-size:0.65rem">No resources</span>
+                                    {% elif not item.has_data %}
                                         <span class="badge bg-secondary" style="font-size:0.65rem">No data</span>
                                     {% endif %}
                                 </td>
