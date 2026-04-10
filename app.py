@@ -512,10 +512,6 @@ def setup_auth(args=None):
     except DefaultCredentialsError:
         logger.warning("No GCP credentials found. API calls will likely fail.")
 
-# Run auth setup at module level if not running as main (e.g. gunicorn)
-if __name__ != "__main__":
-    setup_auth()
-
 # ---------------------------------------------------------------------------
 # Log ingestion sources for SCC Premium — ETD and SHA
 #
