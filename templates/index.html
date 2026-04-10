@@ -98,46 +98,50 @@
             </div>
             {% endif %}
 
-            <!-- Session Authentication Card -->
-            <div class="card mb-4 border-primary">
+            <!-- GCP Identity / Authentication Card -->
+            <div class="card mb-4 border-primary shadow-sm">
                 <div class="card-header bg-primary text-white py-2 d-flex justify-content-between align-items-center">
-                    <strong class="small">Session Authentication</strong>
+                    <strong class="small">GCP Scanning Identity</strong>
                     {% if session.get('user_email') or session.get('sa_email') %}
-                        <a href="{{ url_for('logout') }}" class="btn btn-sm btn-light py-0" style="font-size:0.7rem">Logout / Reset</a>
+                        <a href="{{ url_for('logout') }}" class="btn btn-sm btn-light py-0" style="font-size:0.7rem">Switch / Reset Identity</a>
                     {% endif %}
                 </div>
                 <div class="card-body p-3">
+                    <p class="small text-muted mb-3 border-bottom pb-2">
+                        This application is public. However, it needs a <strong>GCP Identity</strong> to query Monitoring metrics. 
+                        Choose how you want the tool to authenticate with Google Cloud:
+                    </p>
                     <div class="row g-3">
                         <!-- Option A: OAuth2 Login -->
                         <div class="col-md-6 border-end">
                             <label class="form-label small fw-bold mb-2">Option 1: Individual User (OAuth2)</label>
-                            <p class="small text-muted mb-3">Login with your own Google account. The tool will use your personal permissions.</p>
+                            <p class="small text-muted mb-3">Authorize the tool to perform scans using <strong>your own</strong> permissions.</p>
                             {% if session.get('user_creds') %}
                                 <div class="alert alert-success py-1 px-2 mb-0 small">
-                                    Logged in as: <strong>{{ session.get('user_email') }}</strong>
+                                    Scanning as: <strong>{{ session.get('user_email') }}</strong>
                                 </div>
                             {% else %}
-                                <a href="{{ url_for('login') }}" class="btn btn-sm btn-outline-primary w-100">
-                                    <img src="https://www.gstatic.com/images/branding/product/1x/gsuite_512dp.png" width="16" class="me-1">
-                                    Sign in with Google
+                                <a href="{{ url_for('login') }}" class="btn btn-sm btn-primary w-100 d-flex align-items-center justify-content-center">
+                                    <img src="https://www.gstatic.com/images/branding/product/1x/gsuite_512dp.png" width="16" class="me-2">
+                                    Authorize with Google
                                 </a>
                             {% endif %}
                         </div>
 
                         <!-- Option B: JWT Upload -->
                         <div class="col-md-6">
-                            <label class="form-label small fw-bold mb-2">Option 2: Service Account (JWT Upload)</label>
-                            <p class="small text-muted mb-2">Upload a Service Account JSON key for this session.</p>
+                            <label class="form-label small fw-bold mb-2">Option 2: Service Account (JWT)</label>
+                            <p class="small text-muted mb-2">Upload a Service Account key to perform scans as a specific identity.</p>
                             
                             {% if session.get('sa_key_json') %}
                                 <div class="alert alert-info py-1 px-2 mb-0 small">
-                                    Using SA: <strong>{{ session.get('sa_email') }}</strong>
+                                    Scanning as SA: <strong>{{ session.get('sa_email') }}</strong>
                                 </div>
                             {% else %}
                                 <form action="{{ url_for('upload_key') }}" method="POST" enctype="multipart/form-data">
                                     <div class="input-group input-group-sm">
                                         <input type="file" name="key_file" class="form-control" accept=".json">
-                                        <button class="btn btn-primary" type="submit">Upload</button>
+                                        <button class="btn btn-outline-primary" type="submit">Upload</button>
                                     </div>
                                 </form>
                             {% endif %}
