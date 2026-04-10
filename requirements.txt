@@ -1,0 +1,7 @@
+flask
+google-cloud-monitoring
+google-cloud-resource-manager
+google-cloud-asset
+google-auth
+google-cloud-secret-manager
+gunicorn

@@ -42,13 +42,14 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, session, redirect, url_for, flash
 
 # Google Cloud client libraries — imported at module level so import errors
 # surface immediately rather than at first request time.
 from google.cloud import monitoring_v3
 from google.cloud import resourcemanager_v3
 from google.cloud import asset_v1
+from google.cloud import secretmanager
 from google.api_core.exceptions import NotFound, GoogleAPICallError
 from google.auth import default as get_default_credentials
 from google.auth.exceptions import DefaultCredentialsError
@@ -220,55 +221,143 @@ def validate_key_file(path):
     }
 
 
-def setup_auth(args):
-    """Resolve and validate GCP credentials based on CLI args and env.
+# ---------------------------------------------------------------------------
+# Flask application & Configuration
+# ---------------------------------------------------------------------------
+
+app = Flask(__name__)
+
+# Security: Use a SECRET_KEY for sessions.
+# Should be set via environment variable in production.
+app.secret_key = os.environ.get("FLASK_SECRET_KEY")
+if not app.secret_key:
+    # Fallback for development, but warn in logs.
+    logger.warning("FLASK_SECRET_KEY not set! Using a random key for this process.")
+    import secrets
+    app.secret_key = secrets.token_hex(32)
+
+# Pre-fill Org ID from environment variable or CLI
+app.config["CLI_ORG_ID"] = os.environ.get("ORG_ID", "")
+
+@app.route("/upload_key", methods=["POST"])
+def upload_key():
+    """Handle service account JSON key upload and store in session."""
+    if "key_file" not in request.files:
+        flash("No file part")
+        return redirect(url_for("index"))
+    
+    file = request.files["key_file"]
+    if file.filename == "":
+        flash("No selected file")
+        return redirect(url_for("index"))
+    
+    if file:
+        try:
+            content = file.read().decode("utf-8")
+            # Basic validation
+            data = json.loads(content)
+            if data.get("type") != "service_account":
+                flash("Invalid key file: must be a service_account type.")
+                return redirect(url_for("index"))
+            
+            # Store in session (encrypted cookie)
+            session["sa_key_json"] = content
+            session["sa_email"] = data.get("client_email")
+            flash(f"Successfully uploaded key for {session['sa_email']}")
+        except Exception as e:
+            flash(f"Error processing key file: {e}")
+            
+    return redirect(url_for("index"))
+
+@app.route("/clear_key", methods=["POST"])
+def clear_key():
+    """Clear the service account key from session."""
+    session.pop("sa_key_json", None)
+    session.pop("sa_email", None)
+    flash("Session credentials cleared.")
+    return redirect(url_for("index"))
+
+# ---------------------------------------------------------------------------
+# Secret Manager Integration
+# ---------------------------------------------------------------------------
+
+def get_secret(secret_id, project_id=None):
+    """Retrieve a secret value from Secret Manager.
+
+    Args:
+        secret_id: The ID of the secret to retrieve.
+        project_id: The project ID. If None, uses the SECRETS_PROJECT environment variable.
+    """
+    project = project_id or os.environ.get("SECRETS_PROJECT")
+    if not project:
+        logger.warning("SECRETS_PROJECT environment variable not set. Cannot fetch secret.")
+        return None
+
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{project}/secrets/{secret_id}/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8")
+    except Exception as e:
+        logger.error(f"Error retrieving secret {secret_id} from project {project}: {e}")
+        return None
+
+def setup_auth(args=None):
+    """Resolve and validate GCP credentials based on CLI args, session, Secret Manager, or env.
 
     Priority order:
-        1. ``--key-file`` / ``-k`` CLI argument
-        2. ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable
-        3. gcloud Application Default Credentials
-
-    If a key file is explicitly passed (priority 1) and validation fails,
-    the process prints a detailed error with alternative auth options and
-    exits immediately — the app must not start with bad explicit credentials.
-
-    For priorities 2 and 3 we still validate, but failure is non-fatal at
-    startup; the UI will show the auth-error banner instead.
+        1. ``--key-file`` / ``-k`` CLI argument (if args is provided)
+        2. Session-stored key (uploaded via UI)
+        3. ``GCP_SA_SECRET`` - Fetch JWT from Secret Manager
+        4. ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable
+        5. gcloud Application Default Credentials
     """
     # -- Priority 1: explicit --key-file flag --
-    if args.key_file:
+    if args and args.key_file:
         result = validate_key_file(args.key_file)
         if result["valid"]:
-            # Point the standard env var at the validated file so all Google
-            # Cloud client libraries pick it up automatically.
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = result["path"]
-            print(f"[auth] Service account validated: {result['identity']}")
-            if result.get("project"):
-                print(f"[auth] Default project: {result['project']}")
+            logger.info(f"Service account validated: {result['identity']}")
             return
         else:
-            # Explicit key file failed — hard exit with guidance.
-            print(f"\nERROR: Service account key validation failed.", file=sys.stderr)
-            print(f"  Reason: {result['error']}\n", file=sys.stderr)
-            print("Alternative authentication options:", file=sys.stderr)
-            print("  1. Fix the key file and re-run:", file=sys.stderr)
-            print(f"       python3 {sys.argv[0]} -k /path/to/valid-key.json", file=sys.stderr)
-            print("  2. Use gcloud ADC instead (no --key-file):", file=sys.stderr)
-            print("       gcloud auth application-default login", file=sys.stderr)
-            print(f"       python3 {sys.argv[0]}", file=sys.stderr)
-            print("  3. Set the env var directly:", file=sys.stderr)
-            print("       export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json", file=sys.stderr)
-            print(f"       python3 {sys.argv[0]}\n", file=sys.stderr)
+            logger.error(f"Service account key validation failed: {result['error']}")
             sys.exit(1)
 
-    # -- Priority 2: GOOGLE_APPLICATION_CREDENTIALS env var --
+    # -- Priority 2: Session-stored key --
+    if session.get("sa_key_json"):
+        import tempfile
+        tmp_key = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp_key.write(session["sa_key_json"].encode("utf-8"))
+        tmp_key.close()
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_key.name
+        logger.info(f"Using session-stored key for {session.get('sa_email')}")
+        return
+
+    # -- Priority 3: GCP_SA_SECRET (Secret Manager) --
+    sa_secret_id = os.environ.get("GCP_SA_SECRET")
+    if sa_secret_id:
+        logger.info(f"Attempting to load SA key from Secret Manager: {sa_secret_id}")
+        secret_content = get_secret(sa_secret_id)
+        if secret_content:
+            # Write to a temporary file so client libraries can use it via env var
+            import tempfile
+            tmp_key = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+            tmp_key.write(secret_content.encode("utf-8"))
+            tmp_key.close()
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_key.name
+            logger.info("Successfully loaded SA key from Secret Manager")
+            return
+        else:
+            logger.warning("Failed to load SA key from Secret Manager, falling back...")
+
+    # -- Priority 3: GOOGLE_APPLICATION_CREDENTIALS env var --
     env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if env_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.expanduser(env_path)
-        print(f"[auth] Using GOOGLE_APPLICATION_CREDENTIALS={os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
+        logger.info(f"Using GOOGLE_APPLICATION_CREDENTIALS={os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
         return
 
-    # -- Priority 3: gcloud ADC (validated lazily at first API call) --
+    # -- Priority 3: gcloud ADC --
     try:
         creds, project = get_default_credentials()
         identity = (
@@ -276,35 +365,13 @@ def setup_auth(args):
             or getattr(creds, "signer_email", None)
             or "gcloud-user"
         )
-        print(f"[auth] Using gcloud ADC ({identity}, project={project})")
+        logger.info(f"Using gcloud ADC ({identity}, project={project})")
     except DefaultCredentialsError:
-        # No credentials at all — print guidance but don't exit.  The UI will
-        # show the auth-error banner so the user can still see the form.
-        print(
-            "\nWARNING: No GCP credentials found.  The app will start but "
-            "API calls will fail.\n"
-            "  Fix with one of:\n"
-            "    python3 app.py -k /path/to/sa-key.json\n"
-            "    gcloud auth application-default login\n"
-            "    export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json\n",
-            file=sys.stderr,
-        )
+        logger.warning("No GCP credentials found. API calls will likely fail.")
 
-
-# ---------------------------------------------------------------------------
-# Expand tilde early (covers env var set before this script runs)
-# ---------------------------------------------------------------------------
-
-if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.expanduser(
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-    )
-
-# ---------------------------------------------------------------------------
-# Flask application
-# ---------------------------------------------------------------------------
-
-app = Flask(__name__)
+# Run auth setup at module level if not running as main (e.g. gunicorn)
+if __name__ != "__main__":
+    setup_auth()
 
 # ---------------------------------------------------------------------------
 # Log ingestion sources for SCC Premium — ETD and SHA
@@ -1249,7 +1316,6 @@ def estimate_project(project_id, selected_keys, sampling_rate,
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-
 @app.route("/", methods=["GET", "POST"])
 def index():
     """Main (and only) route — renders the estimator form and results.
@@ -1257,6 +1323,11 @@ def index():
     GET  — display the empty form with current auth status.
     POST — run estimates for the selected scope/features, render results.
     """
+    # Initialize authentication for this request context (handles session keys)
+    setup_auth()
+
+    auth_info = get_auth_info()
+
     # Show current credential status in the UI header.
     auth_info = get_auth_info()
     results = None
@@ -1677,7 +1748,12 @@ if __name__ == "__main__":
         sys.exit(0 if ok else 1)
 
     # Store CLI org-id on the app config so the route can pre-fill the form.
-    app.config["CLI_ORG_ID"] = args.org_id or ""
+    # Prefer CLI arg if provided, otherwise environment variable (already set in app.config).
+    if args.org_id:
+        app.config["CLI_ORG_ID"] = args.org_id
+
+    # Get port from environment variable (Cloud Run) or CLI argument
+    port = int(os.environ.get("PORT", args.port))
 
     # Start the Flask development server.
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    app.run(host=args.host, port=port, debug=args.debug)

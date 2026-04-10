@@ -23,6 +23,18 @@
 <div class="container py-5">
     <div class="row justify-content-center">
         <div class="col-lg-9">
+            <!-- Flash Messages -->
+            {% with messages = get_flashed_messages() %}
+              {% if messages %}
+                {% for message in messages %}
+                  <div class="alert alert-info alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                  </div>
+                {% endfor %}
+              {% endif %}
+            {% endwith %}
+
             <h1 class="mb-2">SCC Log Ingestion Estimator</h1>
 
             <div class="alert alert-warning mb-4">
@@ -64,7 +76,6 @@
                 </p>
             </div>
 
-            <!-- Auth status -->
             {% if auth_info %}
             <div class="alert {{ 'alert-success' if auth_info.valid else 'alert-danger' }} d-flex align-items-center mb-4">
                 {% if auth_info.valid %}
@@ -84,6 +95,33 @@
                 {% endif %}
             </div>
             {% endif %}
+
+            <!-- JWT Upload Card -->
+            <div class="card mb-4 border-primary">
+                <div class="card-header bg-primary text-white py-2">
+                    <strong class="small">Session Authentication (JWT Upload)</strong>
+                </div>
+                <div class="card-body p-3">
+                    <p class="small text-muted mb-3">
+                        Upload a Service Account JSON key (JWT) to use for this session. 
+                        Uploaded keys are stored only in your browser's session cookie and are never saved to disk.
+                    </p>
+                    <div class="d-flex align-items-end gap-2">
+                        <form action="{{ url_for('upload_key') }}" method="POST" enctype="multipart/form-data" class="flex-grow-1">
+                            <label class="form-label small fw-bold mb-1">Service Account JSON (JWT)</label>
+                            <div class="input-group input-group-sm">
+                                <input type="file" name="key_file" class="form-control" accept=".json">
+                                <button class="btn btn-primary" type="submit">Upload & Use</button>
+                            </div>
+                        </form>
+                        {% if session.get('sa_key_json') %}
+                        <form action="{{ url_for('clear_key') }}" method="POST">
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Clear Session Key</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
 
             <!-- Required IAM Roles (collapsible) -->
             {% if required_iam %}
