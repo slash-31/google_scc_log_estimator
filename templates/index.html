@@ -2,21 +2,21 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GCP Security Logging Estimator</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
     <style>
         .card-must     { border-left: 4px solid #34a853; }
         .card-rec      { border-left: 4px solid #4285f4; }
-        .card-opt      { border-left: 4px solid #9aa0a6; }
-        .card-feature  { transition: 0.2s; }
-        .card-feature:hover { background-color: #f8f9fa; }
         .badge-must    { background-color: #34a853; }
         .badge-rec     { background-color: #4285f4; }
-        .badge-opt     { background-color: #9aa0a6; }
         .sampling-control { background: #e8f0fe; border-radius: 8px; padding: 1rem; }
-        .scope-field   { display: none; }
-        .scope-field.active { display: block; }
         .project-card  { border-left: 3px solid #4285f4; margin-bottom: 1rem; }
+        .wizard-step   { display: none; }
+        .wizard-step.active { display: block; }
+        .resource-item:hover { background-color: #f1f3f4; cursor: pointer; }
+        .breadcrumb-item + .breadcrumb-item::before { content: ">"; }
     </style>
 </head>
 <body class="bg-light">
@@ -27,7 +27,7 @@
             {% with messages = get_flashed_messages() %}
               {% if messages %}
                 {% for message in messages %}
-                  <div class="alert alert-info alert-dismissible fade show" role="alert">
+                  <div class="alert alert-info alert-dismissible fade show shadow-sm" role="alert">
                     {{ message }}
                     <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                   </div>
@@ -35,613 +35,320 @@
               {% endif %}
             {% endwith %}
 
-            <h1 class="mb-2">SCC Log Ingestion Estimator</h1>
-
-            <div class="alert alert-warning mb-4">
-                <strong>Disclaimer:</strong> The values shown by this tool are <strong>estimates only</strong>
-                and should not be treated as exact billing projections.
+            <div class="text-center mb-5">
+                <h1 class="display-5 fw-bold text-primary">SCC Log Estimator</h1>
+                <p class="lead text-muted">A wizard to estimate your Google Cloud Security logging costs.</p>
             </div>
 
-            <p class="text-muted mb-2">
-                Estimates 30-day Cloud Logging ingestion costs for
-                <strong>Event Threat Detection (ETD)</strong> and
-                <strong>Security Health Analytics (SHA)</strong> in SCC Premium.
-            </p>
-
-            <div class="card bg-light border-0 p-3 mb-4">
-                <p class="small mb-2"><strong>How estimates are generated:</strong></p>
-                <ul class="small mb-2">
-                    <li>
-                        We query <strong>your project's actual Cloud Monitoring metrics</strong>
-                        (request counts, byte counts, packet counts) from the <strong>last 7 days</strong>
-                        via the Cloud Monitoring API.
-                    </li>
-                    <li>
-                        The 7-day totals are divided by 7 and multiplied by 30 to extrapolate a
-                        <strong>30-day estimate</strong>. For always-on audit logs we use actual
-                        ingestion byte counts; for logs not yet enabled we use proxy metrics
-                        (e.g. API request counts) multiplied by an estimated per-entry size.
-                    </li>
-                    <li>
-                        Volume is multiplied by the applicable ingestion rate
-                        (<strong>$0.50/GiB</strong> standard, <strong>$0.25/GiB</strong> for network
-                        telemetry logs) to produce a cost estimate.
-                    </li>
-                </ul>
-                <p class="small text-danger mb-0">
-                    <strong>Important:</strong> Actual logging costs will change as traffic to your
-                    GCP resources increases or decreases. Spikes in API calls, network traffic,
-                    or new workloads will directly increase log volume and cost beyond these
-                    estimates. Re-run this tool periodically to track changes.
-                </p>
-            </div>
-
-            {% if auth_info %}
-            <div class="alert {{ 'alert-success' if auth_info.valid else 'alert-danger' }} d-flex align-items-center mb-4">
-                {% if auth_info.valid %}
-                    <strong class="me-2">Authenticated:</strong>
-                    {% if auth_info.method == 'user' %}
-                        User ({{ auth_info.identity }})
-                    {% elif auth_info.method == 'service_account' %}
-                        Service Account ({{ auth_info.identity }})
-                        {% if auth_info.project %} &mdash; default project: {{ auth_info.project }}{% endif %}
-                    {% else %}
-                        gcloud ADC ({{ auth_info.identity }})
-                        {% if auth_info.project %} &mdash; default project: {{ auth_info.project }}{% endif %}
-                    {% endif %}
-                {% else %}
-                    <strong class="me-2">Not Authenticated:</strong>
-                    {{ auth_info.error }}
-                    <br>Run <code>gcloud auth application-default login</code> or set
-                    <code>GOOGLE_APPLICATION_CREDENTIALS</code> to a service account key file.
-                {% endif %}
-            </div>
-            {% endif %}
-
-            <!-- GCP Identity / Authentication Card -->
-            <div class="card mb-4 border-primary shadow-sm">
-                <div class="card-header bg-primary text-white py-2 d-flex justify-content-between align-items-center">
-                    <strong class="small">GCP Scanning Identity</strong>
-                    {% if session.get('user_email') or session.get('sa_email') %}
-                        <a href="{{ url_for('logout') }}" class="btn btn-sm btn-light py-0" style="font-size:0.7rem">Switch / Reset Identity</a>
-                    {% endif %}
-                </div>
-                <div class="card-body p-3">
-                    <p class="small text-muted mb-3 border-bottom pb-2">
-                        This application is public. However, it needs a <strong>GCP Identity</strong> to query Monitoring metrics. 
-                        Choose how you want the tool to authenticate with Google Cloud:
-                    </p>
-                    <div class="row g-3">
-                        <!-- Option A: OAuth2 Login -->
-                        <div class="col-md-6 border-end">
-                            <label class="form-label small fw-bold mb-2">Option 1: Individual User (OAuth2)</label>
-                            <p class="small text-muted mb-3">Authorize the tool to perform scans using <strong>your own</strong> permissions.</p>
-                            {% if session.get('user_creds') %}
-                                <div class="alert alert-success py-1 px-2 mb-0 small">
-                                    Scanning as: <strong>{{ session.get('user_email') }}</strong>
-                                </div>
-                            {% else %}
-                                <a href="{{ url_for('login') }}" class="btn btn-sm btn-primary w-100 d-flex align-items-center justify-content-center">
-                                    <img src="https://www.gstatic.com/images/branding/product/1x/gsuite_512dp.png" width="16" class="me-2">
-                                    Authorize with Google
-                                </a>
-                            {% endif %}
-                        </div>
-
-                        <!-- Option B: JWT Upload -->
-                        <div class="col-md-6">
-                            <label class="form-label small fw-bold mb-2">Option 2: Service Account (JWT)</label>
-                            <p class="small text-muted mb-2">Upload a Service Account key to perform scans as a specific identity.</p>
-                            
-                            {% if session.get('sa_key_json') %}
-                                <div class="alert alert-info py-1 px-2 mb-0 small">
-                                    Scanning as SA: <strong>{{ session.get('sa_email') }}</strong>
-                                </div>
-                            {% else %}
-                                <form action="{{ url_for('upload_key') }}" method="POST" enctype="multipart/form-data">
-                                    <div class="input-group input-group-sm">
-                                        <input type="file" name="key_file" class="form-control" accept=".json">
-                                        <button class="btn btn-outline-primary" type="submit">Upload</button>
+            <!-- ==================== STEP 1: AUTHENTICATION ==================== -->
+            <div id="step-auth" class="wizard-step {{ 'active' if step == 'auth' else '' }}">
+                <div class="card shadow border-0 mb-4">
+                    <div class="card-header bg-primary text-white py-3">
+                        <h5 class="mb-0"><i class="bi bi-shield-lock me-2"></i>Step 1: GCP Scanning Identity</h5>
+                    </div>
+                    <div class="card-body p-4">
+                        <p class="text-muted mb-4">
+                            To scan your infrastructure and query Monitoring metrics, the tool needs an identity with appropriate permissions.
+                            This application is public; any identity you provide is stored only in your encrypted session.
+                        </p>
+                        <div class="row g-4">
+                            <div class="col-md-6">
+                                <div class="card h-100 border-light shadow-sm">
+                                    <div class="card-body text-center d-flex flex-column justify-content-between">
+                                        <div>
+                                            <i class="bi bi-person-badge display-4 text-primary mb-3"></i>
+                                            <h5>Individual User (OAuth2)</h5>
+                                            <p class="small text-muted">Authorize the tool using your personal Google account. It will use your permissions to run the scan.</p>
+                                        </div>
+                                        <a href="{{ url_for('login') }}" class="btn btn-primary w-100">
+                                            Authorize with Google
+                                        </a>
                                     </div>
-                                </form>
-                            {% endif %}
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card h-100 border-light shadow-sm">
+                                    <div class="card-body text-center d-flex flex-column justify-content-between">
+                                        <div>
+                                            <i class="bi bi-key-fill display-4 text-secondary mb-3"></i>
+                                            <h5>Service Account (JWT)</h5>
+                                            <p class="small text-muted">Upload a Service Account JSON key to perform scans as a specific system identity.</p>
+                                        </div>
+                                        <form action="{{ url_for('upload_key') }}" method="POST" enctype="multipart/form-data">
+                                            <div class="input-group">
+                                                <input type="file" name="key_file" class="form-control" accept=".json">
+                                                <button class="btn btn-outline-primary" type="submit">Upload</button>
+                                            </div>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Required IAM Roles (collapsible) -->
-            {% if required_iam %}
-            <div class="card mb-4">
-                <div class="card-header p-2">
-                    <button class="btn btn-sm btn-link text-decoration-none w-100 text-start"
-                            type="button" data-bs-toggle="collapse" data-bs-target="#iamPanel">
-                        <strong>Required IAM Roles &amp; Permissions</strong>
-                        <span class="text-muted ms-2">(click to expand)</span>
-                    </button>
-                </div>
-                <div class="collapse" id="iamPanel">
-                    <div class="card-body p-3">
-                        <p class="small text-muted mb-3">
-                            The authenticated identity (user or service account) must have
-                            these roles on each target project.  For org/folder scans, the
-                            org-scoped roles are also required.
-                        </p>
-                        <table class="table table-sm small mb-3">
-                            <thead>
-                                <tr>
-                                    <th>IAM Role</th>
-                                    <th>Scope</th>
-                                    <th>Permissions</th>
-                                    <th>Why</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for entry in required_iam %}
-                                <tr>
-                                    <td><code>{{ entry.role }}</code></td>
-                                    <td>
-                                        {% if entry.scope == 'project' %}
-                                            <span class="badge bg-primary">Per Project</span>
-                                        {% else %}
-                                            <span class="badge bg-warning text-dark">Org / Folder</span>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        {% for perm in entry.permissions %}
-                                            <code class="d-block">{{ perm }}</code>
-                                        {% endfor %}
-                                    </td>
-                                    <td>{{ entry.reason }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                        <div class="bg-light rounded p-2">
-                            <p class="small fw-bold mb-1">Grant commands (replace &lt;IDENTITY&gt;):</p>
-                            <pre class="small mb-0" style="white-space:pre-wrap">{% for entry in required_iam %}{% if entry.scope == 'project' %}gcloud projects add-iam-policy-binding PROJECT_ID \
-  --member='serviceAccount:&lt;IDENTITY&gt;' \
-  --role='{{ entry.role }}'
-{% endif %}{% endfor %}
-# For org-wide scans:
-{% for entry in required_iam %}{% if entry.scope == 'org' %}gcloud organizations add-iam-policy-binding ORG_ID \
-  --member='serviceAccount:&lt;IDENTITY&gt;' \
-  --role='{{ entry.role }}'
-{% endif %}{% endfor %}</pre>
+            <!-- ==================== STEP 2: RESOURCE BROWSER ==================== -->
+            <div id="step-browse" class="wizard-step {{ 'active' if step == 'browse' else '' }}">
+                <div class="card shadow border-0 mb-4">
+                    <div class="card-header bg-primary text-white py-3 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="bi bi-search me-2"></i>Step 2: Select Scan Target</h5>
+                        <div class="d-flex align-items-center small">
+                            <span class="me-3">Identity: <strong>{{ auth_info.identity }}</strong></span>
+                            <a href="{{ url_for('logout') }}" class="btn btn-sm btn-light py-0 px-2" style="font-size:0.7rem">Switch</a>
                         </div>
-                        <p class="small text-muted mt-2 mb-0">
-                            Run <code>python3 app.py -c PROJECT_ID</code> to verify permissions with a preflight check.
-                        </p>
+                    </div>
+                    <div class="card-body p-0">
+                        <!-- Browser Header / Breadcrumbs -->
+                        <div class="bg-light border-bottom p-3">
+                            <nav aria-label="breadcrumb">
+                                <ol class="breadcrumb mb-0" id="browser-breadcrumbs">
+                                    <li class="breadcrumb-item"><a href="#" onclick="browse('')">Root</a></li>
+                                </ol>
+                            </nav>
+                        </div>
+
+                        <!-- Hierarchy List -->
+                        <div id="hierarchy-list" class="list-group list-group-flush" style="max-height: 400px; overflow-y: auto;">
+                            <!-- Items loaded via JS -->
+                            <div class="p-5 text-center text-muted">
+                                <div class="spinner-border text-primary mb-3" role="status"></div>
+                                <p>Loading accessible Organizations...</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer bg-white p-3 border-top">
+                        <form id="estimate-form" method="POST">
+                            <input type="hidden" name="step" value="estimate">
+                            <input type="hidden" id="selected-scope" name="scope" value="project">
+                            <input type="hidden" id="selected-project-id" name="project_id" value="">
+                            <input type="hidden" id="selected-org-id" name="org_id" value="">
+                            <input type="hidden" id="selected-folder-id" name="folder_id" value="">
+
+                            <div class="row align-items-end g-3">
+                                <div class="col-md-7">
+                                    <div class="sampling-control py-2 px-3">
+                                        <label class="form-label small fw-bold mb-1">VPC Flow Sampling Rate</label>
+                                        <div class="d-flex align-items-center gap-3">
+                                            <input type="range" class="form-range" name="vpc_sampling_rate" min="0.1" max="1.0" step="0.1" value="0.5">
+                                            <span class="fw-bold small">50%</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-5">
+                                    <button type="submit" id="submit-btn" class="btn btn-primary btn-lg w-100 fw-bold" disabled>
+                                        Select a Target
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Info Alert -->
+                <div class="alert alert-info shadow-sm d-flex align-items-start">
+                    <i class="bi bi-info-circle-fill me-3 fs-4"></i>
+                    <div>
+                        <strong>Discovery Phase:</strong> Once you select a target, the tool will automatically discover all deployed assets. 
+                        It will only include log sources (Must Have & Recommended) where matching assets are found.
                     </div>
                 </div>
             </div>
-            {% endif %}
 
-            <!-- Free-Tier Log Sources (collapsible) -->
-            {% if free_tier_logs %}
-            <div class="card mb-4">
-                <div class="card-header p-2">
-                    <button class="btn btn-sm btn-link text-decoration-none w-100 text-start"
-                            type="button" data-bs-toggle="collapse" data-bs-target="#freeTierPanel">
-                        <strong>Cloud Logging Pricing &amp; Free-Tier Log Sources</strong>
-                        <span class="text-muted ms-2">(click to expand)</span>
-                    </button>
+            <!-- ==================== STEP 3: RESULTS ==================== -->
+            {% if results %}
+            <div id="step-results" class="wizard-step active">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h3 class="mb-0">Estimation Results</h3>
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">
+                        <i class="bi bi-arrow-left me-1"></i> New Scan
+                    </a>
                 </div>
-                <div class="collapse" id="freeTierPanel">
-                    <div class="card-body p-3">
 
-                        <!-- Always-free logs -->
-                        <h6 class="text-success">Always Free &mdash; Unlimited Volume</h6>
-                        <p class="small text-muted mb-2">
-                            These logs are stored in the <code>_Required</code> bucket with a fixed
-                            400-day retention period.  They cannot be disabled and incur
-                            <strong>no ingestion or storage charges</strong> regardless of volume.
-                        </p>
-                        <table class="table table-sm small mb-4">
+                {% if results.scope == 'project' %}
+                    <div class="card shadow p-4 border-primary border-0 mb-4">
+                        <h4 class="text-primary">Project: <code>{{ results.project_id }}</code></h4>
+                        <hr>
+                        <table class="table align-middle">
                             <thead>
                                 <tr>
                                     <th>Log Source</th>
-                                    <th>Retention</th>
-                                    <th>What It Covers</th>
+                                    <th class="text-end">Est. Volume</th>
+                                    <th class="text-end">Est. Cost (USD)</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {% for log in free_tier_logs %}
+                                {% for item in results.estimates %}
                                 <tr>
-                                    <td class="fw-bold">{{ log.name }}</td>
-                                    <td><span class="badge bg-success">{{ log.retention }}</span></td>
-                                    <td>{{ log.coverage }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-
-                        <!-- Paid tiers -->
-                        <h6 class="text-primary">Paid Log Types</h6>
-                        <p class="small text-muted mb-2">
-                            All other logs are stored in the <code>_Default</code> or user-defined
-                            buckets with a default 30-day retention.  The first
-                            <strong>50 GiB per project per month</strong> is free.
-                        </p>
-                        <table class="table table-sm small mb-3">
-                            <thead>
-                                <tr>
-                                    <th>Tier</th>
-                                    <th>Rate</th>
-                                    <th>Free Allotment</th>
-                                    <th>Retention</th>
-                                    <th>Examples</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for tier_name, tier in paid_log_tiers.items() %}
-                                <tr>
-                                    <td class="fw-bold text-capitalize">{{ tier_name }}</td>
-                                    <td>{{ tier.rate }}</td>
-                                    <td>{{ tier.free_allotment }}</td>
-                                    <td>{{ tier.default_retention }}</td>
                                     <td>
-                                        {% for ex in tier.examples %}
-                                            <span class="d-inline-block me-1 mb-1">
-                                                <span class="badge bg-light text-dark border">{{ ex }}</span>
-                                            </span>
-                                        {% endfor %}
+                                        <div class="fw-bold">{{ item.name }}</div>
+                                        <div class="small">
+                                            {% if item.always_on %}<span class="badge bg-success me-1">Always On</span>{% endif %}
+                                            {% if item.guessed %}<span class="badge bg-warning text-dark me-1" title="Metrics were zero, used asset discovery to estimate minimum volume">Educated Guess</span>{% endif %}
+                                            {% if item.resource_count %}<span class="badge bg-info text-dark me-1">{{ item.resource_count }} assets</span>{% endif %}
+                                            {% if not item.has_data %}<span class="badge bg-light text-muted border">No data found</span>{% endif %}
+                                        </div>
                                     </td>
+                                    <td class="text-end">{{ item.volume_gib }} GiB</td>
+                                    <td class="text-end fw-bold text-success">${{ item.cost }}</td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
                         </table>
-                        {% if paid_log_tiers.get('network', {}).get('note') %}
-                        <div class="alert alert-warning small py-2 mb-3">
-                            {{ paid_log_tiers.network.note }}
-                        </div>
-                        {% endif %}
-
-                        <!-- Always-free operations -->
-                        {% if free_operations %}
-                        <h6 class="text-secondary">Always Free Operations (no charge)</h6>
-                        <ul class="small mb-0">
-                            {% for op in free_operations %}
-                            <li>{{ op }}</li>
-                            {% endfor %}
-                        </ul>
-                        {% endif %}
-
-                    </div>
-                </div>
-            </div>
-            {% endif %}
-
-            <!-- SHA info -->
-            <div class="alert alert-info mb-4">
-                <strong>About SHA:</strong> Security Health Analytics analyzes resource configurations from
-                Cloud Asset Inventory, not real-time logs. Enabling logs has minimal impact on SHA.
-                This estimator focuses on <strong>ETD log sources</strong>.
-            </div>
-
-            <form method="POST">
-                <!-- Scope selection -->
-                <div class="card p-3 mb-4 shadow-sm">
-                    <label class="form-label fw-bold mb-2">Estimation Scope</label>
-                    <div class="btn-group w-100 mb-3" role="group">
-                        <input type="radio" class="btn-check" name="scope" value="project"
-                               id="scopeProject" {{ '' if cli_org_id else 'checked' }} onchange="updateScope()">
-                        <label class="btn btn-outline-primary" for="scopeProject">Single Project</label>
-                        <input type="radio" class="btn-check" name="scope" value="folder"
-                               id="scopeFolder" onchange="updateScope()">
-                        <label class="btn btn-outline-primary" for="scopeFolder">Folder</label>
-                        <input type="radio" class="btn-check" name="scope" value="org"
-                               id="scopeOrg" {{ 'checked' if cli_org_id else '' }} onchange="updateScope()">
-                        <label class="btn btn-outline-primary" for="scopeOrg">Organization</label>
-                    </div>
-
-                    <div id="field-project" class="scope-field {{ '' if cli_org_id else 'active' }}">
-                        <label class="form-label">GCP Project ID</label>
-                        <input type="text" name="project_id" class="form-control"
-                               placeholder="my-production-project">
-                    </div>
-                    <div id="field-folder" class="scope-field">
-                        <label class="form-label">Folder ID</label>
-                        <input type="text" name="folder_id" class="form-control"
-                               placeholder="123456789012">
-                        <small class="text-muted">Scans all active projects under this folder.</small>
-                    </div>
-                    <div id="field-org" class="scope-field {{ 'active' if cli_org_id else '' }}">
-                        <label class="form-label">Organization ID</label>
-                        <input type="text" name="org_id" class="form-control"
-                               placeholder="123456789012" value="{{ cli_org_id }}">
-                        <small class="text-muted">
-                            Scans all active projects in the organization.
-                            Requires <code>resourcemanager.projects.list</code> permission.
-                        </small>
-                    </div>
-                </div>
-
-                <!-- MUST HAVE -->
-                <h5 class="mb-2">
-                    <span class="badge badge-must text-white me-1">Must Have</span>
-                    Always-On Logs (no extra cost)
-                </h5>
-                <p class="text-muted small mb-3">
-                    These logs are always enabled. Selecting them shows your current ingestion volume.
-                </p>
-                {% for src in log_sources if src.category == 'must_have' %}
-                <div class="card p-3 mb-2 card-feature card-must">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features"
-                               value="{{ src.key }}" id="{{ src.key }}" checked>
-                        <label class="form-check-label" for="{{ src.key }}">
-                            <strong>{{ src.label }}</strong><br>
-                            <small class="text-muted">{{ src.description }}</small>
-                        </label>
-                    </div>
-                </div>
-                {% endfor %}
-
-                <!-- ETD internal note -->
-                <div class="alert alert-secondary mt-3 mb-4 small">
-                    <strong>ETD Foundational Network Detection:</strong> ETD automatically analyzes an internal,
-                    independent stream of VPC Flow data for network-based threat detection (malware, C2, etc.)
-                    at <strong>no extra Cloud Logging cost</strong>. This data is not queryable in Logs Explorer.
-                </div>
-
-                <!-- HIGHLY RECOMMENDED -->
-                <h5 class="mb-2">
-                    <span class="badge badge-rec text-white me-1">Recommended</span>
-                    Highly Recommended for ETD
-                </h5>
-                <p class="text-muted small mb-3">
-                    Enable these to significantly increase ETD detection scope. Data Access logs are OFF by default.
-                </p>
-                {% for src in log_sources if src.category == 'recommended' %}
-                <div class="card p-3 mb-2 card-feature card-rec">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features"
-                               value="{{ src.key }}" id="{{ src.key }}"
-                               {{ 'checked' if src.key == 'dns' else '' }}>
-                        <label class="form-check-label" for="{{ src.key }}">
-                            <strong>{{ src.label }}</strong>
-                            {% if src.get('supports_sampling') %}
-                                <span class="badge bg-warning text-dark ms-1">Supports Sampling</span>
-                            {% endif %}
-                            <br>
-                            <small class="text-muted">{{ src.description }}</small>
-                        </label>
-                    </div>
-                </div>
-                {% endfor %}
-
-                <!-- VPC Flow Log Sampling -->
-                <div class="sampling-control mt-3 mb-4">
-                    <label class="form-label fw-bold mb-1">VPC Flow Log Sampling Rate</label>
-                    <div class="d-flex align-items-center gap-3">
-                        <input type="range" class="form-range flex-grow-1" name="vpc_sampling_rate"
-                               id="samplingSlider" min="0.1" max="1.0" step="0.1" value="0.5"
-                               oninput="document.getElementById('samplingVal').textContent = this.value">
-                        <span id="samplingVal" class="fw-bold" style="min-width:2.5rem">0.5</span>
-                    </div>
-                    <small class="text-muted">
-                        1.0 = full logging, 0.5 = 50% sampled, 0.1 = 10% sampled.
-                        Start high (0.5-1.0) for sensitive VPCs, lower for less critical subnets.
-                    </small>
-                </div>
-
-                <!-- OPTIONAL -->
-                <h5 class="mb-2">
-                    <span class="badge badge-opt text-white me-1">Optional</span>
-                    Environment-Specific
-                </h5>
-                {% for src in log_sources if src.category == 'optional' %}
-                <div class="card p-3 mb-2 card-feature card-opt">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" name="features"
-                               value="{{ src.key }}" id="{{ src.key }}" disabled>
-                        <label class="form-check-label" for="{{ src.key }}">
-                            <strong>{{ src.label }}</strong>
-                            {% if src.get('manual_only') %}
-                                <span class="badge bg-secondary ms-1">Manual Estimate Only</span>
-                            {% endif %}
-                            <br>
-                            <small class="text-muted">{{ src.description }}</small>
-                        </label>
-                    </div>
-                </div>
-                {% endfor %}
-
-                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold mt-4">
-                    Run Ingestion Estimate
-                </button>
-            </form>
-
-            <!-- ==================== RESULTS ==================== -->
-            {% if results %}
-            <div class="mt-5">
-
-                <!-- SINGLE PROJECT RESULTS -->
-                {% if results.scope == 'project' %}
-                <div class="card shadow p-4 border-primary">
-                    <h3>30-Day Projection: <code>{{ results.project_id }}</code></h3>
-                    <hr>
-                    {% if results.estimates %}
-                    <table class="table align-middle mb-0">
-                        <thead>
-                            <tr>
-                                <th>Log Source</th>
-                                <th>Category</th>
-                                <th class="text-end">Est. Volume</th>
-                                <th class="text-end">Est. Cost (USD)</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for item in results.estimates %}
-                            <tr>
-                                <td>
-                                    {{ item.name }}
-                                    {% if item.always_on %}
-                                        <span class="badge bg-success ms-1">Always On</span>
-                                    {% endif %}
-                                    {% if item.skipped %}
-                                        <span class="badge bg-dark ms-1">No resources</span>
-                                    {% elif not item.has_data %}
-                                        <span class="badge bg-secondary ms-1">No data</span>
-                                    {% endif %}
-                                    {% if item.resource_count is not none and item.resource_count > 0 %}
-                                        <span class="badge bg-info text-dark ms-1">{{ item.resource_count }} resource type(s)</span>
-                                    {% endif %}
-                                </td>
-                                <td>
-                                    {% if item.category == 'must_have' %}
-                                        <span class="badge badge-must text-white">Must Have</span>
-                                    {% elif item.category == 'recommended' %}
-                                        <span class="badge badge-rec text-white">Recommended</span>
-                                    {% else %}
-                                        <span class="badge badge-opt text-white">Optional</span>
-                                    {% endif %}
-                                </td>
-                                <td class="text-end">{{ item.volume_gib }} GiB</td>
-                                <td class="text-end fw-bold text-success">
-                                    ${{ item.cost }}
-                                    {% if item.network_log %}
-                                        <br><span class="badge bg-info text-dark" style="font-size:0.6rem">$0.25/GiB</span>
-                                    {% endif %}
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                    <div class="d-flex justify-content-between align-items-center pt-3 mt-3 border-top">
-                        <div>
-                            <span class="text-muted small">$0.50/GiB standard rate. Network logs (VPC Flow, LB, NAT) at $0.25/GiB.</span>
-                            {% if results.sampling_rate < 1.0 %}
-                            <br><span class="text-muted small">VPC Flow Logs sampled at {{ results.sampling_rate }}.</span>
-                            {% endif %}
-                        </div>
-                        <div class="text-end">
-                            <div class="text-muted small">Total Volume: {{ results.total_gib }} GiB</div>
-                            <h2 class="text-primary mb-0">Total: ${{ results.total_cost }}/mo</h2>
+                        <div class="d-flex justify-content-between mt-4">
+                            <div class="text-muted small">Based on 7-day metric baseline.</div>
+                            <div class="text-end">
+                                <h2 class="text-primary mb-0">Total: ${{ results.total_cost }}/mo</h2>
+                            </div>
                         </div>
                     </div>
-                    {% else %}
-                    <p class="text-muted">No estimable log sources were selected.</p>
-                    {% endif %}
-
-                    <!-- Explain "No data" badge -->
-                    {% if results.estimates %}
-                    {% set no_data_count = results.estimates | selectattr('has_data', 'false') | list | length %}
-                    {% if no_data_count > 0 %}
-                    <div class="alert alert-secondary small mt-3 mb-0">
-                        <strong>No data</strong> means the Cloud Monitoring metric returned no results for this
-                        project.  This typically means the GCP service is not in use (e.g. no Cloud DNS zones,
-                        no Cloud SQL instances) — the estimated volume for those sources is $0.
-                    </div>
-                    {% endif %}
-                    {% endif %}
-                </div>
-
-                <!-- ORG / FOLDER RESULTS -->
                 {% elif results.scope in ('org', 'folder') %}
-                <div class="card shadow p-4 border-primary mb-4">
-                    <h3>
-                        30-Day Projection:
-                        {% if results.scope == 'org' %}
-                            Organization <code>{{ results.org_id }}</code>
-                        {% else %}
-                            Folder <code>{{ results.folder_id }}</code>
-                        {% endif %}
-                    </h3>
-                    <p class="text-muted">{{ results.project_count }} project(s) scanned</p>
-                    <hr>
+                    <!-- Summary Card for Multi-Project -->
+                    <div class="card shadow p-4 border-primary border-0 mb-4 text-center">
+                        <h4 class="text-muted mb-1 text-uppercase small fw-bold">Aggregate 30-Day Estimate</h4>
+                        <h1 class="display-4 text-primary fw-bold mb-0">${{ results.grand_total_cost }}/mo</h1>
+                        <p class="text-muted">{{ results.project_count }} projects scanned ({{ results.grand_total_gib }} GiB total)</p>
+                    </div>
 
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <span class="text-muted small">$0.50/GiB standard rate. Network logs (VPC Flow, LB, NAT) at $0.25/GiB.</span>
-                            {% if results.sampling_rate < 1.0 %}
-                            <br><span class="text-muted small">VPC Flow Logs sampled at {{ results.sampling_rate }}.</span>
-                            {% endif %}
-                        </div>
-                        <div class="text-end">
-                            <div class="text-muted small">Total Volume: {{ results.grand_total_gib }} GiB</div>
-                            <h2 class="text-primary mb-0">Grand Total: ${{ results.grand_total_cost }}/mo</h2>
+                    <!-- Per-project detail -->
+                    {% for proj in results.projects %}
+                    <div class="card p-3 project-card border-0 shadow-sm mb-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-0">{{ proj.display_name }}</h6>
+                                <code class="small text-muted">{{ proj.project_id }}</code>
+                            </div>
+                            <div class="text-end">
+                                <strong class="text-primary">${{ proj.total_cost }}/mo</strong>
+                                <br><span class="small text-muted">{{ proj.total_gib }} GiB</span>
+                            </div>
                         </div>
                     </div>
-                </div>
-
-                <!-- Per-project breakdown -->
-                {% for proj in results.projects %}
-                <div class="card p-3 project-card">
-                    <div class="d-flex justify-content-between align-items-start mb-2">
-                        <div>
-                            <strong>{{ proj.display_name }}</strong>
-                            <br><code class="small">{{ proj.project_id }}</code>
-                        </div>
-                        <div class="text-end">
-                            <span class="text-muted small">{{ proj.total_gib }} GiB</span>
-                            <br><strong class="text-primary">${{ proj.total_cost }}/mo</strong>
-                        </div>
-                    </div>
-                    {% if proj.estimates %}
-                    <table class="table table-sm mb-0">
-                        <thead>
-                            <tr>
-                                <th>Log Source</th>
-                                <th class="text-end">Volume</th>
-                                <th class="text-end">Cost</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for item in proj.estimates %}
-                            <tr>
-                                <td class="small">
-                                    {{ item.name }}
-                                    {% if item.always_on %}
-                                        <span class="badge bg-success" style="font-size:0.65rem">Always On</span>
-                                    {% endif %}
-                                    {% if item.skipped %}
-                                        <span class="badge bg-dark" style="font-size:0.65rem">No resources</span>
-                                    {% elif not item.has_data %}
-                                        <span class="badge bg-secondary" style="font-size:0.65rem">No data</span>
-                                    {% endif %}
-                                </td>
-                                <td class="text-end small">{{ item.volume_gib }} GiB</td>
-                                <td class="text-end small">${{ item.cost }}</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                    {% else %}
-                    <p class="text-muted small mb-0">No metric data returned.</p>
-                    {% endif %}
-                </div>
-                {% endfor %}
-
-                {% if not results.projects %}
-                <div class="alert alert-warning">
-                    No projects found. Verify the
-                    {% if results.scope == 'org' %}organization{% else %}folder{% endif %}
-                    ID and that your credentials have
-                    <code>resourcemanager.projects.list</code> permission.
-                </div>
+                    {% endfor %}
                 {% endif %}
-
-                {% endif %}{# end scope check #}
             </div>
             {% endif %}
 
-            <footer class="text-center text-muted small mt-5 mb-3">
-                Estimates are projections based on 7-day metric baselines extrapolated to 30 days.
-                Actual costs may vary. VPC Flow Log estimates are rough approximations.
-            </footer>
         </div>
     </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function updateScope() {
-    const scope = document.querySelector('input[name="scope"]:checked').value;
-    document.querySelectorAll('.scope-field').forEach(el => el.classList.remove('active'));
-    document.getElementById('field-' + scope).classList.add('active');
-}
+    const hierarchyList = document.getElementById('hierarchy-list');
+    const breadcrumbs = document.getElementById('browser-breadcrumbs');
+    const submitBtn = document.getElementById('submit-btn');
+    const scopeInput = document.getElementById('selected-scope');
+    const projectInput = document.getElementById('selected-project-id');
+    const orgInput = document.getElementById('selected-org-id');
+    const folderInput = document.getElementById('selected-folder-id');
+
+    let currentPath = [];
+
+    // Initial Load
+    if (document.getElementById('step-browse').classList.contains('active')) {
+        browse('');
+    }
+
+    async function browse(parentId) {
+        hierarchyList.innerHTML = `
+            <div class="p-5 text-center text-muted">
+                <div class="spinner-border spinner-border-sm text-primary mb-3"></div>
+                <p>Loading...</p>
+            </div>`;
+        
+        // Reset selections
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Select a Target";
+
+        try {
+            const resp = await fetch(`/api/browse?parent=${parentId}`);
+            const data = await resp.json();
+            
+            if (data.error) {
+                hierarchyList.innerHTML = `<div class="alert alert-danger m-3">${data.error}</div>`;
+                return;
+            }
+
+            renderBreadcrumbs(parentId);
+            
+            if (data.resources.length === 0) {
+                hierarchyList.innerHTML = `<div class="p-5 text-center text-muted">No folders or projects found here.</div>`;
+                return;
+            }
+
+            hierarchyList.innerHTML = '';
+            data.resources.forEach(res => {
+                const item = document.createElement('div');
+                item.className = 'list-group-item resource-item d-flex justify-content-between align-items-center p-3';
+                
+                const icon = res.type === 'organization' ? 'bi-building' : 
+                             (res.type === 'folder' ? 'bi-folder' : 'bi-pc-display');
+                
+                item.innerHTML = `
+                    <div class="d-flex align-items-center">
+                        <i class="bi ${icon} me-3 fs-5 text-muted"></i>
+                        <div>
+                            <div class="fw-bold">${res.display_name}</div>
+                            <div class="small text-muted">${res.id}</div>
+                        </div>
+                    </div>
+                    <div class="btn-group btn-group-sm">
+                        ${res.type !== 'project' ? `<button class="btn btn-outline-secondary" onclick="event.stopPropagation(); browse('${res.id}')">Open</button>` : ''}
+                        <button class="btn btn-primary" onclick="event.stopPropagation(); selectResource('${res.type}', '${res.id}', '${res.display_name}', '${res.project_id || ''}')">Select</button>
+                    </div>
+                `;
+                
+                if (res.type !== 'project') {
+                    item.onclick = () => browse(res.id);
+                } else {
+                    item.onclick = () => selectResource(res.type, res.id, res.display_name, res.project_id);
+                }
+                
+                hierarchyList.appendChild(item);
+            });
+        } catch (e) {
+            hierarchyList.innerHTML = `<div class="alert alert-danger m-3">Failed to load resources: ${e}</div>`;
+        }
+    }
+
+    function selectResource(type, id, name, projectId) {
+        // Update UI
+        document.querySelectorAll('.resource-item').forEach(el => el.classList.remove('list-group-item-primary'));
+        
+        // Find the item clicked and highlight
+        const items = hierarchyList.querySelectorAll('.resource-item');
+        for (let item of items) {
+            if (item.innerText.includes(id)) {
+                item.classList.add('list-group-item-primary');
+                break;
+            }
+        }
+
+        // Update hidden inputs
+        scopeInput.value = type;
+        projectInput.value = projectId;
+        orgInput.value = type === 'organization' ? id.split('/')[1] : '';
+        folderInput.value = type === 'folder' ? id.split('/')[1] : '';
+
+        // Enable Submit
+        submitBtn.disabled = false;
+        submitBtn.textContent = `Run Estimate on ${name}`;
+    }
+
+    function renderBreadcrumbs(parentId) {
+        // Very basic breadcrumb logic
+        if (!parentId) {
+            currentPath = [];
+            breadcrumbs.innerHTML = `<li class="breadcrumb-item active">Root (Organizations)</li>`;
+        } else {
+            // Keep it simple: Root > Current
+            breadcrumbs.innerHTML = `
+                <li class="breadcrumb-item"><a href="#" onclick="browse('')">Root</a></li>
+                <li class="breadcrumb-item active">${parentId}</li>
+            `;
+        }
+    }
 </script>
 </body>
 </html>

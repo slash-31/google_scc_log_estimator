@@ -740,6 +740,58 @@ _monitoring_client = None
 _projects_client = None
 _folders_client = None
 _asset_client = None
+_orgs_client = None
+
+def _get_organizations_client():
+    """Return an OrganizationsClient."""
+    global _orgs_client
+    user_creds = getattr(g, "user_creds", None)
+    if user_creds:
+        return resourcemanager_v3.OrganizationsClient(credentials=user_creds)
+    
+    if _orgs_client is None:
+        _orgs_client = resourcemanager_v3.OrganizationsClient()
+    return _orgs_client
+
+@app.route("/api/browse", methods=["GET"])
+def browse_hierarchy():
+    """API to browse the resource hierarchy (Orgs -> Folders -> Projects)."""
+    parent = request.args.get("parent") # e.g. "organizations/123" or "folders/456"
+    
+    try:
+        results = []
+        if not parent:
+            # List Orgs
+            client = _get_organizations_client()
+            for org in client.search_organizations(query=""):
+                results.append({
+                    "id": org.name,
+                    "display_name": org.display_name,
+                    "type": "organization"
+                })
+        elif parent.startswith("organizations/") or parent.startswith("folders/"):
+            # List Folders
+            f_client = _get_folders_client()
+            for folder in f_client.list_folders(parent=parent):
+                results.append({
+                    "id": folder.name,
+                    "display_name": folder.display_name,
+                    "type": "folder"
+                })
+            # List Projects
+            p_client = _get_projects_client()
+            for project in p_client.list_projects(parent=parent):
+                results.append({
+                    "id": f"projects/{project.project_id}",
+                    "display_name": project.display_name,
+                    "project_id": project.project_id,
+                    "type": "project"
+                })
+        
+        return {"resources": results}
+    except Exception as e:
+        logger.error(f"Error browsing hierarchy for {parent}: {e}")
+        return {"error": str(e)}, 500
 
 
 def _get_monitoring_client():
@@ -1445,12 +1497,21 @@ def estimate_project(project_id, selected_keys, sampling_rate,
         gib = estimate_monthly_gib(source, raw_7d, sampling_rate)
 
         rate = COST_PER_GIB_NETWORK if source.get("network_log") else COST_PER_GIB
+        
+        # Educated Guess Logic:
+        # If monitoring is zero but we know resources exist of this type,
+        # apply a default "educated guess" volume (~0.1 GiB/mo).
+        guessed = False
+        _, resource_count = should_query_metric(source, project_assets)
+        if gib == 0 and resource_count and resource_count > 0:
+            gib = 0.1
+            guessed = True
+
         cost = gib * rate
-        has_data = raw_7d > 0
+        has_data = raw_7d > 0 or guessed
 
         # Determine resource status for UI.
         was_skipped = source in skipped_sources
-        _, resource_count = should_query_metric(source, project_assets)
 
         estimates.append({
             "name": source["label"],
@@ -1459,6 +1520,7 @@ def estimate_project(project_id, selected_keys, sampling_rate,
             "cost": round(cost, 2),
             "always_on": source.get("always_on", False),
             "has_data": has_data,
+            "guessed": guessed,
             "network_log": source.get("network_log", False),
             "skipped": was_skipped,
             "resource_count": resource_count,
@@ -1474,101 +1536,85 @@ def estimate_project(project_id, selected_keys, sampling_rate,
 # ---------------------------------------------------------------------------
 @app.route("/", methods=["GET", "POST"])
 def index():
-    """Main (and only) route — renders the estimator form and results.
-
-    GET  — display the empty form with current auth status.
-    POST — run estimates for the selected scope/features, render results.
-    """
+    """Main route — renders the wizard-style estimator."""
     auth_info = get_auth_info()
+    
+    # Step 1: Authentication Gate
+    if not auth_info["valid"]:
+        return render_template("index.html", auth_info=auth_info, step="auth")
 
-    # Show current credential status in the UI header.
-    auth_info = get_auth_info()
+    # Determine current step from request or default to browser
+    step = request.form.get("step", "browse")
+    
+    # Pre-fill Org ID
+    cli_org_id = app.config.get("CLI_ORG_ID", "")
     results = None
 
-    if request.method == "POST":
-        # -- Collect form inputs --
+    if request.method == "POST" and step == "estimate":
+        # Handle the estimation logic (Step 3)
         scope = request.form.get("scope", "project")
         project_id = request.form.get("project_id", "").strip()
         org_id = request.form.get("org_id", "").strip()
         folder_id = request.form.get("folder_id", "").strip()
-        selected_keys = request.form.getlist("features")
 
-        # Clamp sampling rate to the valid 0.0–1.0 range.
-        sampling_rate = float(request.form.get("vpc_sampling_rate", 0.5))
-        sampling_rate = max(0.0, min(1.0, sampling_rate))
+        # Automatic Selection: All Must Have and Recommended sources
+        selected_keys = [
+            src["key"] for src in LOG_SOURCES 
+            if src["category"] in ("must_have", "recommended")
+        ]
+        
+        vpc_sampling_rate = float(request.form.get("vpc_sampling_rate", 0.5))
 
-        # -- Single-project scope --
-        if scope == "project":
-            # Discover assets for this project (one API call).
-            assets = discover_assets(f"projects/{project_id}")
-            pa = assets.get(project_id) if assets else None
+        try:
+            if scope == "project":
+                if not project_id:
+                    raise ValueError("Project ID is required.")
+                
+                assets = discover_assets(f"projects/{project_id}")
+                pa = assets.get(project_id) if assets else None
+                estimates, total_gib, total_cost = estimate_project(
+                    project_id, selected_keys, vpc_sampling_rate, pa
+                )
+                results = {
+                    "scope": "project",
+                    "project_id": project_id,
+                    "estimates": estimates,
+                    "total_gib": round(total_gib, 3),
+                    "total_cost": f"{total_cost:,.2f}",
+                    "sampling_rate": vpc_sampling_rate,
+                }
 
-            estimates, total_gib, total_cost = estimate_project(
-                project_id, selected_keys, sampling_rate,
-                project_assets=pa,
-            )
-            results = {
-                "scope": "project",
-                "project_id": project_id,
-                "estimates": estimates,
-                "total_gib": round(total_gib, 3),
-                "total_cost": round(total_cost, 2),
-                "sampling_rate": sampling_rate,
-            }
+            elif scope == "org":
+                if not org_id:
+                    raise ValueError("Organization ID is required.")
+                results = scan_organization(
+                    f"organizations/{org_id}", selected_keys, vpc_sampling_rate
+                )
 
-        # -- Organization-wide scope --
-        elif scope == "org":
-            # One asset discovery call for the entire org — returns all
-            # resources across all projects, grouped by project.
-            assets = discover_assets(f"organizations/{org_id}")
+            elif scope == "folder":
+                if not folder_id:
+                    raise ValueError("Folder ID is required.")
+                results = scan_folder(
+                    f"folders/{folder_id}", selected_keys, vpc_sampling_rate
+                )
 
-            projects = list_org_projects(org_id)
-            project_results, grand_total_gib, grand_total_cost = _scan_projects(
-                projects, selected_keys, sampling_rate,
-                assets_by_project=assets,
-            )
-            results = {
-                "scope": "org",
-                "org_id": org_id,
-                "projects": project_results,
-                "project_count": len(projects),
-                "grand_total_gib": round(grand_total_gib, 3),
-                "grand_total_cost": round(grand_total_cost, 2),
-                "sampling_rate": sampling_rate,
-            }
-
-        # -- Folder scope --
-        elif scope == "folder":
-            assets = discover_assets(f"folders/{folder_id}")
-
-            projects = list_folder_projects(folder_id)
-            project_results, grand_total_gib, grand_total_cost = _scan_projects(
-                projects, selected_keys, sampling_rate,
-                assets_by_project=assets,
-            )
-            results = {
-                "scope": "folder",
-                "folder_id": folder_id,
-                "projects": project_results,
-                "project_count": len(projects),
-                "grand_total_gib": round(grand_total_gib, 3),
-                "grand_total_cost": round(grand_total_cost, 2),
-                "sampling_rate": sampling_rate,
-            }
-
-    # Pre-fill org ID from CLI flag if provided.
-    cli_org_id = app.config.get("CLI_ORG_ID", "")
+        except Exception as exc:
+            flash(f"Estimation failed: {exc}")
+            logger.error(f"Estimation failed: {exc}", exc_info=True)
+            results = None
+            step = "browse" # Fall back to browser on error
 
     return render_template(
         "index.html",
+        auth_info=auth_info,
         results=results,
         log_sources=LOG_SOURCES,
-        auth_info=auth_info,
-        required_iam=REQUIRED_IAM,
-        free_tier_logs=FREE_TIER_LOGS,
         paid_log_tiers=PAID_LOG_TIERS,
+        free_tier_logs=FREE_TIER_LOGS,
         free_operations=FREE_OPERATIONS,
+        required_iam=REQUIRED_IAM,
         cli_org_id=cli_org_id,
+        step=step
     )
 
 
