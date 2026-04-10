@@ -42,7 +42,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from flask import Flask, render_template, request, session, redirect, url_for, flash, g
+from flask import Flask, render_template, request, session, redirect, url_for, flash, g, has_request_context
 
 # Google Cloud client libraries — imported at module level so import errors
 # surface immediately rather than at first request time.
@@ -241,6 +241,11 @@ if not app.secret_key:
 # Pre-fill Org ID from environment variable or CLI
 app.config["CLI_ORG_ID"] = os.environ.get("ORG_ID", "")
 
+@app.before_request
+def ensure_auth():
+    """Initialize authentication for every request context."""
+    setup_auth()
+
 @app.route("/upload_key", methods=["POST"])
 def upload_key():
     """Handle service account JSON key upload and store in session."""
@@ -426,8 +431,8 @@ def setup_auth(args=None):
 
     Priority order:
         1. ``--key-file`` / ``-k`` CLI argument (if args is provided)
-        2. User Credentials (OAuth2 via "Login with Google")
-        3. Session-stored SA key (uploaded via UI)
+        2. User Credentials (OAuth2 via "Login with Google") - REQUEST ONLY
+        3. Session-stored SA key (uploaded via UI) - REQUEST ONLY
         4. ``GCP_SA_SECRET`` - Fetch JWT from Secret Manager
         5. ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable
         6. gcloud Application Default Credentials
@@ -443,32 +448,35 @@ def setup_auth(args=None):
             logger.error(f"Service account key validation failed: {result['error']}")
             sys.exit(1)
 
-    # -- Priority 2: User Credentials (OAuth2) --
-    if session.get("user_creds"):
-        creds_data = session["user_creds"]
-        creds = Credentials(
-            token=creds_data["token"],
-            refresh_token=creds_data["refresh_token"],
-            token_uri=creds_data["token_uri"],
-            client_id=creds_data["client_id"],
-            client_secret=creds_data["client_secret"],
-            scopes=creds_data["scopes"],
-        )
-        g.user_creds = creds
-        logger.info(f"Using user credentials for {session.get('user_email')}")
-        return
+    # Request-specific authentication (Session/OAuth2)
+    if has_request_context():
+        # -- Priority 2: User Credentials (OAuth2) --
+        if session.get("user_creds"):
+            creds_data = session["user_creds"]
+            creds = Credentials(
+                token=creds_data["token"],
+                refresh_token=creds_data["refresh_token"],
+                token_uri=creds_data["token_uri"],
+                client_id=creds_data["client_id"],
+                client_secret=creds_data["client_secret"],
+                scopes=creds_data["scopes"],
+            )
+            g.user_creds = creds
+            logger.info(f"Using user credentials for {session.get('user_email')}")
+            return
 
-    # -- Priority 3: Session-stored SA key --
-    if session.get("sa_key_json"):
-        import tempfile
-        tmp_key = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-        tmp_key.write(session["sa_key_json"].encode("utf-8"))
-        tmp_key.close()
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_key.name
-        logger.info(f"Using session-stored key for {session.get('sa_email')}")
-        return
+        # -- Priority 3: Session-stored SA key --
+        if session.get("sa_key_json"):
+            import tempfile
+            tmp_key = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+            tmp_key.write(session["sa_key_json"].encode("utf-8"))
+            tmp_key.close()
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_key.name
+            logger.info(f"Using session-stored key for {session.get('sa_email')}")
+            return
 
-    # -- Priority 3: GCP_SA_SECRET (Secret Manager) --
+    # System-level authentication (Secret Manager / Env / ADC)
+    # -- Priority 4: GCP_SA_SECRET (Secret Manager) --
     sa_secret_id = os.environ.get("GCP_SA_SECRET")
     if sa_secret_id:
         logger.info(f"Attempting to load SA key from Secret Manager: {sa_secret_id}")
@@ -1475,9 +1483,6 @@ def index():
     GET  — display the empty form with current auth status.
     POST — run estimates for the selected scope/features, render results.
     """
-    # Initialize authentication for this request context (handles session keys)
-    setup_auth()
-
     auth_info = get_auth_info()
 
     # Show current credential status in the UI header.
