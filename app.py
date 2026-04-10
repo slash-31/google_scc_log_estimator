@@ -43,6 +43,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request, session, redirect, url_for, flash, g, has_request_context
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Google Cloud client libraries — imported at module level so import errors
 # surface immediately rather than at first request time.
@@ -229,6 +230,10 @@ def validate_key_file(path):
 
 app = Flask(__name__)
 
+# Essential for Cloud Run: Tells Flask to trust the X-Forwarded-* headers
+# provided by the Google Cloud Run proxy to correctly determine HTTPS.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 # Security: Use a SECRET_KEY for sessions.
 # Should be set via environment variable in production.
 app.secret_key = os.environ.get("FLASK_SECRET_KEY")
@@ -320,16 +325,20 @@ SCOPES = [
 @app.route("/login")
 def login():
     """Start the OAuth2 flow."""
-    # Build the redirect URI dynamically based on the current request
+    # Build the redirect URI dynamically. ProxyFix handles HTTPS.
     redirect_uri = url_for("oauth2callback", _external=True)
-    if redirect_uri.startswith("http://") and "localhost" not in redirect_uri:
-        # Force HTTPS for Cloud Run
-        redirect_uri = redirect_uri.replace("http://", "https://", 1)
+    logger.info(f"OAuth Login initiated. Redirect URI: {redirect_uri}")
 
     client_config = _get_oauth_config()
     if not client_config:
         flash("OAuth2 Client ID/Secret not configured. Check environment variables.")
         return redirect(url_for("index"))
+
+    # Security: Require HTTPS for OAuth unless explicitly disabled for local dev.
+    if not redirect_uri.startswith("https://") and "localhost" not in redirect_uri:
+        if os.environ.get("OAUTHLIB_INSECURE_TRANSPORT") != "1":
+            flash("OAuth2 requires HTTPS. Check Cloud Run configuration.")
+            return redirect(url_for("index"))
 
     flow = Flow.from_client_config(client_config, scopes=SCOPES)
     flow.redirect_uri = redirect_uri
@@ -346,23 +355,22 @@ def oauth2callback():
     """Handle the OAuth2 callback."""
     state = session.get("state")
     if not state:
+        logger.error("OAuth state missing from session.")
         flash("OAuth2 state missing from session.")
         return redirect(url_for("index"))
 
     redirect_uri = url_for("oauth2callback", _external=True)
-    if redirect_uri.startswith("http://") and "localhost" not in redirect_uri:
-        redirect_uri = redirect_uri.replace("http://", "https://", 1)
-
     client_config = _get_oauth_config()
     flow = Flow.from_client_config(client_config, scopes=SCOPES, state=state)
     flow.redirect_uri = redirect_uri
 
-    # Use the request URL but ensure it's HTTPS if needed
-    authorization_response = request.url
-    if authorization_response.startswith("http://") and "localhost" not in authorization_response:
-        authorization_response = authorization_response.replace("http://", "https://", 1)
-
-    flow.fetch_token(authorization_response=authorization_response)
+    # Fetch token using the incoming request URL
+    try:
+        flow.fetch_token(authorization_response=request.url)
+    except Exception as e:
+        logger.error(f"Failed to fetch OAuth token: {e}")
+        flash(f"Login failed: {e}")
+        return redirect(url_for("index"))
 
     credentials = flow.credentials
     session["user_creds"] = {
