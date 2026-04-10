@@ -42,7 +42,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from flask import Flask, render_template, request, session, redirect, url_for, flash
+from flask import Flask, render_template, request, session, redirect, url_for, flash, g
 
 # Google Cloud client libraries — imported at module level so import errors
 # surface immediately rather than at first request time.
@@ -50,6 +50,8 @@ from google.cloud import monitoring_v3
 from google.cloud import resourcemanager_v3
 from google.cloud import asset_v1
 from google.cloud import secretmanager
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
 from google.api_core.exceptions import NotFound, GoogleAPICallError
 from google.auth import default as get_default_credentials
 from google.auth.exceptions import DefaultCredentialsError
@@ -302,15 +304,133 @@ def get_secret(secret_id, project_id=None):
         logger.error(f"Error retrieving secret {secret_id} from project {project}: {e}")
         return None
 
+# OAuth2 Scopes
+SCOPES = [
+    "https://www.googleapis.com/auth/monitoring.read",
+    "https://www.googleapis.com/auth/cloud-platform.read-only",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
+
+@app.route("/login")
+def login():
+    """Start the OAuth2 flow."""
+    # Build the redirect URI dynamically based on the current request
+    redirect_uri = url_for("oauth2callback", _external=True)
+    if redirect_uri.startswith("http://") and "localhost" not in redirect_uri:
+        # Force HTTPS for Cloud Run
+        redirect_uri = redirect_uri.replace("http://", "https://", 1)
+
+    client_config = _get_oauth_config()
+    if not client_config:
+        flash("OAuth2 Client ID/Secret not configured. Check environment variables.")
+        return redirect(url_for("index"))
+
+    flow = Flow.from_client_config(client_config, scopes=SCOPES)
+    flow.redirect_uri = redirect_uri
+
+    authorization_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true"
+    )
+    session["state"] = state
+    return redirect(authorization_url)
+
+@app.route("/oauth2callback")
+def oauth2callback():
+    """Handle the OAuth2 callback."""
+    state = session.get("state")
+    if not state:
+        flash("OAuth2 state missing from session.")
+        return redirect(url_for("index"))
+
+    redirect_uri = url_for("oauth2callback", _external=True)
+    if redirect_uri.startswith("http://") and "localhost" not in redirect_uri:
+        redirect_uri = redirect_uri.replace("http://", "https://", 1)
+
+    client_config = _get_oauth_config()
+    flow = Flow.from_client_config(client_config, scopes=SCOPES, state=state)
+    flow.redirect_uri = redirect_uri
+
+    # Use the request URL but ensure it's HTTPS if needed
+    authorization_response = request.url
+    if authorization_response.startswith("http://") and "localhost" not in authorization_response:
+        authorization_response = authorization_response.replace("http://", "https://", 1)
+
+    flow.fetch_token(authorization_response=authorization_response)
+
+    credentials = flow.credentials
+    session["user_creds"] = {
+        "token": credentials.token,
+        "refresh_token": credentials.refresh_token,
+        "token_uri": credentials.token_uri,
+        "client_id": credentials.client_id,
+        "client_secret": credentials.client_secret,
+        "scopes": credentials.scopes,
+    }
+    
+    # Try to get user email
+    from googleapiclient.discovery import build
+    service = build("oauth2", "v2", credentials=credentials)
+    user_info = service.bookshelf().get().execute() if False else {} # Mock or use actual
+    # Simpler way to get email if scope included openid/email
+    session["user_email"] = _get_user_email(credentials)
+    
+    flash(f"Successfully logged in as {session.get('user_email')}")
+    return redirect(url_for("index"))
+
+def _get_oauth_config():
+    """Get OAuth2 client config from environment variables."""
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    
+    if not client_id or not client_secret:
+        # Try Secret Manager if IDs provided
+        client_id_secret = os.environ.get("OAUTH_CLIENT_ID_SECRET")
+        client_secret_secret = os.environ.get("OAUTH_CLIENT_SECRET_SECRET")
+        if client_id_secret and client_secret_secret:
+            client_id = get_secret(client_id_secret)
+            client_secret = get_secret(client_secret_secret)
+            
+    if not client_id or not client_secret:
+        return None
+        
+    return {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+
+def _get_user_email(credentials):
+    """Helper to get user email from credentials."""
+    try:
+        from googleapiclient.discovery import build
+        service = build("oauth2", "v2", credentials=credentials)
+        info = service.userinfo().get().execute()
+        return info.get("email")
+    except Exception:
+        return "User"
+
+@app.route("/logout")
+def logout():
+    """Clear all session data."""
+    session.clear()
+    flash("Logged out successfully.")
+    return redirect(url_for("index"))
+
 def setup_auth(args=None):
     """Resolve and validate GCP credentials based on CLI args, session, Secret Manager, or env.
 
     Priority order:
         1. ``--key-file`` / ``-k`` CLI argument (if args is provided)
-        2. Session-stored key (uploaded via UI)
-        3. ``GCP_SA_SECRET`` - Fetch JWT from Secret Manager
-        4. ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable
-        5. gcloud Application Default Credentials
+        2. User Credentials (OAuth2 via "Login with Google")
+        3. Session-stored SA key (uploaded via UI)
+        4. ``GCP_SA_SECRET`` - Fetch JWT from Secret Manager
+        5. ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable
+        6. gcloud Application Default Credentials
     """
     # -- Priority 1: explicit --key-file flag --
     if args and args.key_file:
@@ -323,7 +443,22 @@ def setup_auth(args=None):
             logger.error(f"Service account key validation failed: {result['error']}")
             sys.exit(1)
 
-    # -- Priority 2: Session-stored key --
+    # -- Priority 2: User Credentials (OAuth2) --
+    if session.get("user_creds"):
+        creds_data = session["user_creds"]
+        creds = Credentials(
+            token=creds_data["token"],
+            refresh_token=creds_data["refresh_token"],
+            token_uri=creds_data["token_uri"],
+            client_id=creds_data["client_id"],
+            client_secret=creds_data["client_secret"],
+            scopes=creds_data["scopes"],
+        )
+        g.user_creds = creds
+        logger.info(f"Using user credentials for {session.get('user_email')}")
+        return
+
+    # -- Priority 3: Session-stored SA key --
     if session.get("sa_key_json"):
         import tempfile
         tmp_key = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
@@ -604,32 +739,48 @@ _asset_client = None
 
 
 def _get_monitoring_client():
-    """Return a shared MetricServiceClient (created once, reused)."""
+    """Return a MetricServiceClient."""
     global _monitoring_client
+    user_creds = getattr(g, "user_creds", None)
+    if user_creds:
+        return monitoring_v3.MetricServiceClient(credentials=user_creds)
+    
     if _monitoring_client is None:
         _monitoring_client = monitoring_v3.MetricServiceClient()
     return _monitoring_client
 
 
 def _get_projects_client():
-    """Return a shared ProjectsClient (created once, reused)."""
+    """Return a ProjectsClient."""
     global _projects_client
+    user_creds = getattr(g, "user_creds", None)
+    if user_creds:
+        return resourcemanager_v3.ProjectsClient(credentials=user_creds)
+
     if _projects_client is None:
         _projects_client = resourcemanager_v3.ProjectsClient()
     return _projects_client
 
 
 def _get_folders_client():
-    """Return a shared FoldersClient (created once, reused)."""
+    """Return a FoldersClient."""
     global _folders_client
+    user_creds = getattr(g, "user_creds", None)
+    if user_creds:
+        return resourcemanager_v3.FoldersClient(credentials=user_creds)
+
     if _folders_client is None:
         _folders_client = resourcemanager_v3.FoldersClient()
     return _folders_client
 
 
 def _get_asset_client():
-    """Return a shared AssetServiceClient (created once, reused)."""
+    """Return an AssetServiceClient."""
     global _asset_client
+    user_creds = getattr(g, "user_creds", None)
+    if user_creds:
+        return asset_v1.AssetServiceClient(credentials=user_creds)
+
     if _asset_client is None:
         _asset_client = asset_v1.AssetServiceClient()
     return _asset_client
@@ -819,18 +970,19 @@ FREE_OPERATIONS = [
 # ---------------------------------------------------------------------------
 
 def get_auth_info():
-    """Detect the active GCP credential and return a status dict for the UI.
+    """Detect the active GCP credential and return a status dict for the UI."""
+    # Priority 1: User Credentials (OAuth2) from session/g
+    user_creds = getattr(g, "user_creds", None)
+    if user_creds:
+        return {
+            "method": "user",
+            "valid": True,
+            "identity": session.get("user_email", "Authenticated User"),
+            "project": None,
+            "error": None
+        }
 
-    Returns:
-        dict with keys:
-            method   — "service_account" | "adc" | "none"
-            valid    — bool
-            identity — str  (email or label)
-            project  — str | None  (default project from credential)
-            file     — str | None  (path, if SA key)
-            error    — str | None  (human-readable failure reason)
-    """
-    # Check 1: Is GOOGLE_APPLICATION_CREDENTIALS set and pointing at a file?
+    # Priority 2: Service Account key file
     sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if sa_path and os.path.isfile(sa_path):
         try:

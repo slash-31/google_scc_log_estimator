@@ -24,6 +24,18 @@ variable "sa_secret_id" {
   default     = ""
 }
 
+variable "oauth_client_id" {
+  description = "OAuth2 Client ID"
+  type        = string
+  default     = ""
+}
+
+variable "oauth_client_secret" {
+  description = "OAuth2 Client Secret"
+  type        = string
+  default     = ""
+}
+
 variable "image_tag" {
   description = "The container image tag to deploy"
   type        = string

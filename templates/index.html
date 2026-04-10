@@ -80,7 +80,9 @@
             <div class="alert {{ 'alert-success' if auth_info.valid else 'alert-danger' }} d-flex align-items-center mb-4">
                 {% if auth_info.valid %}
                     <strong class="me-2">Authenticated:</strong>
-                    {% if auth_info.method == 'service_account' %}
+                    {% if auth_info.method == 'user' %}
+                        User ({{ auth_info.identity }})
+                    {% elif auth_info.method == 'service_account' %}
                         Service Account ({{ auth_info.identity }})
                         {% if auth_info.project %} &mdash; default project: {{ auth_info.project }}{% endif %}
                     {% else %}
@@ -96,29 +98,50 @@
             </div>
             {% endif %}
 
-            <!-- JWT Upload Card -->
+            <!-- Session Authentication Card -->
             <div class="card mb-4 border-primary">
-                <div class="card-header bg-primary text-white py-2">
-                    <strong class="small">Session Authentication (JWT Upload)</strong>
+                <div class="card-header bg-primary text-white py-2 d-flex justify-content-between align-items-center">
+                    <strong class="small">Session Authentication</strong>
+                    {% if session.get('user_email') or session.get('sa_email') %}
+                        <a href="{{ url_for('logout') }}" class="btn btn-sm btn-light py-0" style="font-size:0.7rem">Logout / Reset</a>
+                    {% endif %}
                 </div>
                 <div class="card-body p-3">
-                    <p class="small text-muted mb-3">
-                        Upload a Service Account JSON key (JWT) to use for this session. 
-                        Uploaded keys are stored only in your browser's session cookie and are never saved to disk.
-                    </p>
-                    <div class="d-flex align-items-end gap-2">
-                        <form action="{{ url_for('upload_key') }}" method="POST" enctype="multipart/form-data" class="flex-grow-1">
-                            <label class="form-label small fw-bold mb-1">Service Account JSON (JWT)</label>
-                            <div class="input-group input-group-sm">
-                                <input type="file" name="key_file" class="form-control" accept=".json">
-                                <button class="btn btn-primary" type="submit">Upload & Use</button>
-                            </div>
-                        </form>
-                        {% if session.get('sa_key_json') %}
-                        <form action="{{ url_for('clear_key') }}" method="POST">
-                            <button class="btn btn-sm btn-outline-danger" type="submit">Clear Session Key</button>
-                        </form>
-                        {% endif %}
+                    <div class="row g-3">
+                        <!-- Option A: OAuth2 Login -->
+                        <div class="col-md-6 border-end">
+                            <label class="form-label small fw-bold mb-2">Option 1: Individual User (OAuth2)</label>
+                            <p class="small text-muted mb-3">Login with your own Google account. The tool will use your personal permissions.</p>
+                            {% if session.get('user_creds') %}
+                                <div class="alert alert-success py-1 px-2 mb-0 small">
+                                    Logged in as: <strong>{{ session.get('user_email') }}</strong>
+                                </div>
+                            {% else %}
+                                <a href="{{ url_for('login') }}" class="btn btn-sm btn-outline-primary w-100">
+                                    <img src="https://www.gstatic.com/images/branding/product/1x/gsuite_512dp.png" width="16" class="me-1">
+                                    Sign in with Google
+                                </a>
+                            {% endif %}
+                        </div>
+
+                        <!-- Option B: JWT Upload -->
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold mb-2">Option 2: Service Account (JWT Upload)</label>
+                            <p class="small text-muted mb-2">Upload a Service Account JSON key for this session.</p>
+                            
+                            {% if session.get('sa_key_json') %}
+                                <div class="alert alert-info py-1 px-2 mb-0 small">
+                                    Using SA: <strong>{{ session.get('sa_email') }}</strong>
+                                </div>
+                            {% else %}
+                                <form action="{{ url_for('upload_key') }}" method="POST" enctype="multipart/form-data">
+                                    <div class="input-group input-group-sm">
+                                        <input type="file" name="key_file" class="form-control" accept=".json">
+                                        <button class="btn btn-primary" type="submit">Upload</button>
+                                    </div>
+                                </form>
+                            {% endif %}
+                        </div>
                     </div>
                 </div>
             </div>

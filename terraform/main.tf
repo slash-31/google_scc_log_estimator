@@ -74,6 +74,16 @@ resource "google_cloud_run_v2_service" "default" {
         value = var.sa_secret_id
       }
 
+      env {
+        name  = "OAUTH_CLIENT_ID"
+        value = var.oauth_client_id
+      }
+
+      env {
+        name  = "OAUTH_CLIENT_SECRET"
+        value = var.oauth_client_secret
+      }
+
       ports {
         container_port = 8080
       }
