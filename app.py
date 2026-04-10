@@ -802,11 +802,16 @@ def browse_hierarchy():
         return {"error": str(e)}, 500
 
 
-def _get_monitoring_client():
+def _get_monitoring_client(project_id=None):
     """Return a MetricServiceClient."""
     global _monitoring_client
     user_creds = getattr(g, "user_creds", None)
     if user_creds:
+        # If we have a target project, use it as the quota project
+        if project_id:
+            return monitoring_v3.MetricServiceClient(
+                credentials=user_creds.with_quota_project(project_id)
+            )
         return monitoring_v3.MetricServiceClient(credentials=user_creds)
     
     if _monitoring_client is None:
@@ -838,11 +843,15 @@ def _get_folders_client():
     return _folders_client
 
 
-def _get_asset_client():
+def _get_asset_client(project_id=None):
     """Return an AssetServiceClient."""
     global _asset_client
     user_creds = getattr(g, "user_creds", None)
     if user_creds:
+        if project_id:
+            return asset_v1.AssetServiceClient(
+                credentials=user_creds.with_quota_project(project_id)
+            )
         return asset_v1.AssetServiceClient(credentials=user_creds)
 
     if _asset_client is None:
